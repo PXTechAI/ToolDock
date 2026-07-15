@@ -147,6 +147,7 @@ Native packages must be built on their target operating system.
 
 - `.github/workflows/ci.yml` checks versions, builds the frontend, validates Rust formatting, and runs native checks on Windows, macOS, and Linux.
 - `.github/workflows/release.yml` builds Windows NSIS, macOS DMG, Linux AppImage, and Linux DEB packages.
+- `.github/workflows/pages.yml` publishes the multilingual static project website from `website/` to GitHub Pages.
 - Pushing a tag such as `v0.2.0` creates a draft GitHub Release. Review and publish it manually.
 
 Before tagging, keep the versions in `package.json`, `src-tauri/tauri.conf.json`, and `src-tauri/Cargo.toml` identical and update `CHANGELOG.md`.
@@ -162,6 +163,7 @@ See [the release guide](docs/RELEASING.md) for details.
 |-- scripts/             # Repository maintenance scripts
 |-- src/                 # React interface
 |-- src-tauri/           # Rust native layer and Tauri configuration
+|-- website/             # Multilingual GitHub Pages website
 |-- README.zh-CN.md      # Simplified Chinese documentation
 `-- README.ja.md         # Japanese documentation
 ```
@@ -170,4 +172,4 @@ See [the release guide](docs/RELEASING.md) for details.
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request. Report security issues privately according to [SECURITY.md](SECURITY.md).
 
-No open-source license has been selected yet. Choose and add a license before public distribution.
+ToolDock is open source under the [MIT License](LICENSE).

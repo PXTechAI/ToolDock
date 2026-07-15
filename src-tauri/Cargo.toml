@@ -3,6 +3,7 @@ name = "tooldock"
 version = "0.1.0"
 description = "A focused cross-platform developer desktop toolkit."
 authors = ["PX Labs"]
+license = "MIT"
 edition = "2021"
 
 [lib]
