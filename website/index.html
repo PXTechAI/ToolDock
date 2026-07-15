@@ -5,20 +5,35 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta
       name="description"
-      content="ToolDock is a cross-platform desktop toolbox for developers."
+      content="ToolDock is an open-source desktop toolbox for developers on Windows, macOS, and Linux."
     />
-    <meta name="theme-color" content="#101318" />
-    <title>ToolDock | Developer Toolbox</title>
+    <meta name="theme-color" content="#0b0e12" />
+    <meta property="og:title" content="ToolDock | Developer Desktop Toolbox" />
+    <meta
+      property="og:description"
+      content="Color picking, port inspection, screenshots, screen recording, and secure string generation in one local desktop app."
+    />
+    <title>ToolDock | Developer Desktop Toolbox</title>
     <link rel="icon" href="assets/tooldock.svg" />
     <link rel="stylesheet" href="styles.css" />
+    <script
+      defer
+      src="https://analytics.routemarket.ai/rm.js"
+      data-website-id="b2b1d94f-9606-48bb-a385-86f66936df57"
+    ></script>
   </head>
   <body>
     <header class="site-header">
       <a class="brand" href="#top" aria-label="ToolDock home">
-        <img src="assets/tooldock.svg" alt="" width="36" height="36" />
+        <img src="assets/tooldock.svg" alt="" width="34" height="34" />
         <span>ToolDock</span>
       </a>
-      <nav class="header-actions" aria-label="Primary navigation">
+      <nav class="primary-nav" aria-label="Primary navigation">
+        <a href="#features" data-i18n="navFeatures">Features</a>
+        <a href="#screenshots" data-i18n="navScreenshots">Screenshots</a>
+        <a href="#download" data-i18n="navDownload">Download</a>
+      </nav>
+      <div class="header-actions">
         <div class="language-switcher" role="group" aria-label="Language">
           <button type="button" data-language="zh-CN">中</button>
           <button type="button" data-language="en">EN</button>
@@ -26,7 +41,7 @@
           <button type="button" data-language="ko">한</button>
         </div>
         <a class="header-link repository-link" href="#" data-i18n="navGithub">GitHub</a>
-      </nav>
+      </div>
     </header>
 
     <main id="top">
@@ -37,8 +52,8 @@
           <p class="eyebrow" data-i18n="eyebrow">Developer desktop toolbox</p>
           <h1 id="hero-title">ToolDock</h1>
           <p class="hero-copy" data-i18n="heroCopy">
-            Pick colors, inspect ports, capture screenshots, record your screen,
-            and generate secure strings without leaving your desktop.
+            Keep the small utilities that interrupt development in one fast,
+            local, cross-platform workspace.
           </p>
           <div class="hero-actions">
             <a class="button button-primary releases-link" href="#" data-i18n="download">
@@ -48,16 +63,35 @@
               View source
             </a>
           </div>
-          <p class="platforms" data-i18n="platforms">Windows · macOS · Linux</p>
+          <div class="hero-meta">
+            <span data-i18n="platforms">Windows · macOS · Linux</span>
+            <span data-i18n="license">Open source · MIT License</span>
+            <span data-i18n="localFirst">Local first</span>
+          </div>
+        </div>
+        <a class="next-section" href="#features" data-i18n-aria="exploreAria">
+          <span data-i18n="explore">Explore ToolDock</span>
+          <span aria-hidden="true">↓</span>
+        </a>
+      </section>
+
+      <section class="intro-band">
+        <div class="section-inner intro-layout">
+          <p class="section-kicker" data-i18n="introKicker">Stay in flow</p>
+          <h2 data-i18n="introTitle">The utility drawer your desktop was missing.</h2>
+          <p data-i18n="introCopy">
+            ToolDock brings screen, process, and text utilities together without
+            sending your data through a browser service.
+          </p>
         </div>
       </section>
 
-      <section class="feature-band" aria-labelledby="features-title">
+      <section class="feature-band" id="features" aria-labelledby="features-title">
         <div class="section-inner">
           <div class="section-heading">
             <p class="eyebrow" data-i18n="featuresEyebrow">One dock, daily tools</p>
             <h2 id="features-title" data-i18n="featuresTitle">
-              Built for the small jobs that interrupt real work
+              Five focused tools for everyday development work
             </h2>
           </div>
           <div class="feature-grid">
@@ -65,41 +99,98 @@
               <span class="feature-index">01</span>
               <h3 data-i18n="colorTitle">Screen color picker</h3>
               <p data-i18n="colorCopy">
-                A cross-display overlay, magnifier, and instant HEX/RGB clipboard output.
+                Pick across displays with an overlay and magnifier, then copy HEX
+                and RGB instantly.
               </p>
             </article>
             <article class="feature-card">
               <span class="feature-index">02</span>
               <h3 data-i18n="portTitle">Port process manager</h3>
               <p data-i18n="portCopy">
-                Find the process behind a local port and safely terminate selected entries.
+                Find the process behind one port or a range, then terminate selected
+                entries in one action.
               </p>
             </article>
             <article class="feature-card">
               <span class="feature-index">03</span>
-              <h3 data-i18n="captureTitle">Screenshots and recording</h3>
+              <h3 data-i18n="captureTitle">Screenshots</h3>
               <p data-i18n="captureCopy">
-                Capture full displays, selected regions, or application windows with history.
+                Capture a display or a selected region, copy it to the clipboard,
+                and revisit local history.
               </p>
             </article>
             <article class="feature-card">
               <span class="feature-index">04</span>
+              <h3 data-i18n="recordTitle">Screen recording</h3>
+              <p data-i18n="recordCopy">
+                Record a display, region, or app window with live preview, quality
+                controls, and optional audio.
+              </p>
+            </article>
+            <article class="feature-card">
+              <span class="feature-index">05</span>
               <h3 data-i18n="stringTitle">Secure string generator</h3>
               <p data-i18n="stringCopy">
-                Generate UUIDs, HEX values, passwords, and custom-length random strings.
+                Generate UUIDs, HEX values, passwords, and custom-length random
+                strings in batches.
               </p>
             </article>
           </div>
         </div>
       </section>
 
-      <section class="showcase" aria-labelledby="showcase-title">
-        <div class="section-inner">
-          <div class="section-heading">
-            <p class="eyebrow" data-i18n="showcaseEyebrow">Native desktop workflow</p>
-            <h2 id="showcase-title" data-i18n="showcaseTitle">
-              A focused interface in light or dark mode
+      <section class="workflow-band" aria-labelledby="workflow-title">
+        <div class="section-inner workflow-layout">
+          <div class="workflow-copy">
+            <p class="eyebrow" data-i18n="workflowEyebrow">Designed for momentum</p>
+            <h2 id="workflow-title" data-i18n="workflowTitle">
+              Available the moment you need it, gone when you do not.
             </h2>
+            <p data-i18n="workflowCopy">
+              Global shortcuts open color picking, region capture, and recording.
+              ToolDock can stay in the system tray while histories and preferences
+              remain ready for the next task.
+            </p>
+          </div>
+          <ol class="workflow-list">
+            <li>
+              <span>01</span>
+              <div>
+                <strong data-i18n="workflowOneTitle">Trigger from anywhere</strong>
+                <p data-i18n="workflowOneCopy">Use configurable global shortcuts or the compact sidebar.</p>
+              </div>
+            </li>
+            <li>
+              <span>02</span>
+              <div>
+                <strong data-i18n="workflowTwoTitle">Work across displays</strong>
+                <p data-i18n="workflowTwoCopy">Select the active display, region, or application window.</p>
+              </div>
+            </li>
+            <li>
+              <span>03</span>
+              <div>
+                <strong data-i18n="workflowThreeTitle">Keep the result close</strong>
+                <p data-i18n="workflowThreeCopy">Copy immediately or return to local screenshot and recording history.</p>
+              </div>
+            </li>
+          </ol>
+        </div>
+      </section>
+
+      <section class="showcase" id="screenshots" aria-labelledby="showcase-title">
+        <div class="section-inner">
+          <div class="section-heading showcase-heading">
+            <div>
+              <p class="eyebrow" data-i18n="showcaseEyebrow">The actual app</p>
+              <h2 id="showcase-title" data-i18n="showcaseTitle">
+                A focused workspace in light or dark mode
+              </h2>
+            </div>
+            <p data-i18n="showcaseCopy">
+              A quiet interface made for repeated actions, with larger text,
+              configurable fonts, and Chinese, English, Japanese, and Korean.
+            </p>
           </div>
           <figure class="primary-shot">
             <img
@@ -108,6 +199,7 @@
               data-i18n-alt="colorAlt"
               loading="lazy"
             />
+            <figcaption data-i18n="colorCaption">Color picker with recent values</figcaption>
           </figure>
           <div class="secondary-shots">
             <figure>
@@ -117,6 +209,7 @@
                 data-i18n-alt="portAlt"
                 loading="lazy"
               />
+              <figcaption data-i18n="portCaption">Port and process inspection</figcaption>
             </figure>
             <figure>
               <img
@@ -125,7 +218,50 @@
                 data-i18n-alt="recordingAlt"
                 loading="lazy"
               />
+              <figcaption data-i18n="recordingCaption">Screen recording with live preview</figcaption>
             </figure>
+          </div>
+        </div>
+      </section>
+
+      <section class="download-band" id="download" aria-labelledby="download-title">
+        <div class="section-inner">
+          <div class="download-heading">
+            <p class="eyebrow" data-i18n="downloadEyebrow">Open-source desktop app</p>
+            <h2 id="download-title" data-i18n="downloadTitle">
+              Download ToolDock for your platform
+            </h2>
+            <p data-i18n="downloadCopy">
+              Release assets are published on GitHub. Choose the package for your
+              operating system and follow the platform installer.
+            </p>
+          </div>
+          <div class="platform-grid">
+            <article>
+              <span class="platform-mark">WIN</span>
+              <h3>Windows</h3>
+              <p data-i18n="windowsCopy">Use the NSIS installer or MSI package from the latest release.</p>
+              <a class="text-link releases-link" href="#" data-i18n="viewDownloads">View downloads →</a>
+            </article>
+            <article>
+              <span class="platform-mark">MAC</span>
+              <h3>macOS</h3>
+              <p data-i18n="macCopy">Download the DMG for your Mac architecture from the latest release.</p>
+              <a class="text-link releases-link" href="#" data-i18n="viewDownloads">View downloads →</a>
+            </article>
+            <article>
+              <span class="platform-mark">LNX</span>
+              <h3>Linux</h3>
+              <p data-i18n="linuxCopy">Choose an AppImage or distribution package from the latest release.</p>
+              <a class="text-link releases-link" href="#" data-i18n="viewDownloads">View downloads →</a>
+            </article>
+          </div>
+          <div class="requirement-note">
+            <strong data-i18n="requirementTitle">Screen recording requirement</strong>
+            <p data-i18n="requirementCopy">
+              Install FFmpeg or set TOOLDOCK_FFMPEG to enable H.264 MP4 recording
+              and audio input detection.
+            </p>
           </div>
         </div>
       </section>
@@ -138,12 +274,12 @@
               Your captures and process data stay on your machine
             </h2>
             <p data-i18n="openCopy">
-              ToolDock is released under the MIT License. Build it yourself, inspect the
-              source, and adapt it to your workflow.
+              ToolDock is released under the MIT License. Inspect the source,
+              build it yourself, and adapt it to your workflow.
             </p>
           </div>
           <div class="open-source-actions">
-            <a class="button button-primary repository-link" href="#" data-i18n="browse">
+            <a class="button button-dark repository-link" href="#" data-i18n="browse">
               Browse repository
             </a>
             <a
@@ -153,6 +289,21 @@
               data-i18n="moreTools"
             >
               Explore RouteMarket Tools
+            </a>
+          </div>
+        </div>
+      </section>
+
+      <section class="final-cta" aria-labelledby="final-title">
+        <div class="section-inner">
+          <p class="eyebrow" data-i18n="finalEyebrow">Ready when you are</p>
+          <h2 id="final-title" data-i18n="finalTitle">Put the everyday tools back within reach.</h2>
+          <div class="hero-actions">
+            <a class="button button-primary releases-link" href="#" data-i18n="download">
+              Download latest release
+            </a>
+            <a class="button button-secondary repository-link" href="#" data-i18n="source">
+              View source
             </a>
           </div>
         </div>

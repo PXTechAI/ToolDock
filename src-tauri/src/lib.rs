@@ -7,7 +7,7 @@ use std::{
     borrow::Cow,
     collections::{HashMap, HashSet},
     fs,
-    io::{Cursor, Write},
+    io::{Cursor, Read, Write},
     path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
     sync::{
@@ -148,6 +148,12 @@ struct ColorPickerResultEvent {
 #[serde(rename_all = "camelCase")]
 struct AppSettings {
     theme: String,
+    #[serde(default = "default_language")]
+    language: String,
+    #[serde(default = "default_ui_font")]
+    ui_font: String,
+    #[serde(default = "default_font_scale")]
+    font_scale: f64,
     screenshot_dir: String,
     recording_dir: String,
     #[serde(default = "default_color_shortcut")]
@@ -158,6 +164,11 @@ struct AppSettings {
     recording_shortcut: String,
     #[serde(default = "default_true")]
     close_to_tray: bool,
+}
+
+struct TrayMenuState {
+    show_item: MenuItem<tauri::Wry>,
+    quit_item: MenuItem<tauri::Wry>,
 }
 
 #[derive(Deserialize)]
@@ -187,7 +198,18 @@ struct RecordingConfig {
     height: Option<u32>,
     fps: u32,
     bitrate_kbps: u32,
+    #[serde(default)]
+    audio_enabled: bool,
+    audio_input_id: Option<String>,
     output_directory: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AudioInputInfo {
+    id: String,
+    name: String,
+    is_default: bool,
 }
 
 #[derive(Serialize)]
@@ -457,6 +479,27 @@ fn default_true() -> bool {
     true
 }
 
+fn default_language() -> String {
+    "zh-CN".into()
+}
+
+fn tray_labels(language: &str) -> (&'static str, &'static str) {
+    match language {
+        "en" => ("Show ToolDock", "Quit"),
+        "ja" => ("ToolDock を表示", "終了"),
+        "ko" => ("ToolDock 표시", "종료"),
+        _ => ("显示 ToolDock", "退出"),
+    }
+}
+
+fn default_ui_font() -> String {
+    "system".into()
+}
+
+fn default_font_scale() -> f64 {
+    1.1
+}
+
 fn settings_file() -> PathBuf {
     dirs::config_dir()
         .unwrap_or_else(std::env::temp_dir)
@@ -467,6 +510,9 @@ fn settings_file() -> PathBuf {
 fn default_settings() -> AppSettings {
     AppSettings {
         theme: "dark".into(),
+        language: default_language(),
+        ui_font: default_ui_font(),
+        font_scale: default_font_scale(),
         screenshot_dir: default_screenshot_folder().to_string_lossy().into_owned(),
         recording_dir: default_recording_folder().to_string_lossy().into_owned(),
         color_shortcut: default_color_shortcut(),
@@ -500,10 +546,29 @@ fn load_settings() -> AppSettings {
 }
 
 #[tauri::command]
-fn save_settings(mut settings: AppSettings) -> Result<AppSettings, String> {
+fn save_settings(
+    mut settings: AppSettings,
+    tray_menu: State<'_, TrayMenuState>,
+) -> Result<AppSettings, String> {
     if settings.theme != "light" {
         settings.theme = "dark".into();
     }
+    if !matches!(settings.language.as_str(), "zh-CN" | "en" | "ja" | "ko") {
+        settings.language = default_language();
+    }
+    if !matches!(
+        settings.ui_font.as_str(),
+        "system" | "sans" | "cjk" | "mono"
+    ) {
+        settings.ui_font = default_ui_font();
+    }
+    settings.font_scale = if settings.font_scale < 1.05 {
+        1.0
+    } else if settings.font_scale < 1.15 {
+        1.1
+    } else {
+        1.2
+    };
     if settings.screenshot_dir.trim().is_empty() {
         settings.screenshot_dir = default_screenshot_folder().to_string_lossy().into_owned();
     }
@@ -532,6 +597,15 @@ fn save_settings(mut settings: AppSettings) -> Result<AppSettings, String> {
     fs::create_dir_all(&settings.recording_dir)
         .map_err(|error| format!("无法创建录屏目录：{error}"))?;
     write_settings(&settings)?;
+    let (show_label, quit_label) = tray_labels(&settings.language);
+    tray_menu
+        .show_item
+        .set_text(show_label)
+        .map_err(|error| format!("无法更新托盘菜单：{error}"))?;
+    tray_menu
+        .quit_item
+        .set_text(quit_label)
+        .map_err(|error| format!("无法更新托盘菜单：{error}"))?;
     Ok(settings)
 }
 
@@ -1304,6 +1378,124 @@ fn recording_capabilities() -> RecordingCapabilities {
     }
 }
 
+#[tauri::command]
+fn list_audio_inputs() -> Result<Vec<AudioInputInfo>, String> {
+    #[cfg(target_os = "windows")]
+    {
+        let ffmpeg = find_ffmpeg().ok_or_else(|| "未找到 FFmpeg，无法检测音频设备".to_string())?;
+        let output = Command::new(ffmpeg)
+            .args([
+                "-hide_banner",
+                "-list_devices",
+                "true",
+                "-f",
+                "dshow",
+                "-i",
+                "dummy",
+            ])
+            .output()
+            .map_err(|error| format!("无法检测音频设备：{error}"))?;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let mut devices = Vec::new();
+        for line in stderr
+            .lines()
+            .filter(|line| line.trim_end().ends_with("(audio)"))
+        {
+            let Some(start) = line.find('"') else {
+                continue;
+            };
+            let Some(relative_end) = line[start + 1..].find('"') else {
+                continue;
+            };
+            let name = line[start + 1..start + 1 + relative_end].trim();
+            if !name.is_empty() && !devices.iter().any(|item: &AudioInputInfo| item.id == name) {
+                devices.push(AudioInputInfo {
+                    id: name.into(),
+                    name: name.into(),
+                    is_default: devices.is_empty(),
+                });
+            }
+        }
+        return Ok(devices);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let ffmpeg = find_ffmpeg().ok_or_else(|| "FFmpeg was not found".to_string())?;
+        let output = Command::new(ffmpeg)
+            .args([
+                "-hide_banner",
+                "-f",
+                "avfoundation",
+                "-list_devices",
+                "true",
+                "-i",
+                "",
+            ])
+            .output()
+            .map_err(|error| format!("Could not detect audio devices: {error}"))?;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let mut in_audio_section = false;
+        let mut devices = Vec::new();
+        for line in stderr.lines() {
+            if line.contains("AVFoundation audio devices:") {
+                in_audio_section = true;
+                continue;
+            }
+            if !in_audio_section {
+                continue;
+            }
+            let Some(index_start) = line.rfind('[') else {
+                continue;
+            };
+            let Some(index_end) = line[index_start + 1..].find(']') else {
+                continue;
+            };
+            let id = line[index_start + 1..index_start + 1 + index_end].trim();
+            let name = line[index_start + 1 + index_end + 1..].trim();
+            if id.parse::<u32>().is_ok() && !name.is_empty() {
+                devices.push(AudioInputInfo {
+                    id: id.into(),
+                    name: name.into(),
+                    is_default: devices.is_empty(),
+                });
+            }
+        }
+        return Ok(devices);
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let output = Command::new("pactl")
+            .args(["list", "sources", "short"])
+            .output();
+        let mut devices = Vec::new();
+        if let Ok(output) = output {
+            for line in String::from_utf8_lossy(&output.stdout).lines() {
+                let fields = line.split_whitespace().collect::<Vec<_>>();
+                if fields.len() >= 2 {
+                    devices.push(AudioInputInfo {
+                        id: fields[1].into(),
+                        name: fields[1].into(),
+                        is_default: devices.is_empty(),
+                    });
+                }
+            }
+        }
+        if devices.is_empty() {
+            devices.push(AudioInputInfo {
+                id: "default".into(),
+                name: "Default audio input".into(),
+                is_default: true,
+            });
+        }
+        return Ok(devices);
+    }
+
+    #[allow(unreachable_code)]
+    Ok(Vec::new())
+}
+
 fn spawn_ffmpeg(
     ffmpeg: &Path,
     input_width: u32,
@@ -1312,52 +1504,89 @@ fn spawn_ffmpeg(
     output_height: u32,
     fps: u32,
     bitrate_kbps: u32,
+    audio_enabled: bool,
+    audio_input_id: Option<&str>,
     path: &Path,
-) -> Result<(Child, ChildStdin), String> {
+) -> Result<(Child, ChildStdin, JoinHandle<String>), String> {
     let filter = format!(
         "scale={output_width}:{output_height}:force_original_aspect_ratio=decrease,pad={output_width}:{output_height}:(ow-iw)/2:(oh-ih)/2"
     );
     let mut command = Command::new(ffmpeg);
+    command.args([
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "rgba",
+        "-video_size",
+        &format!("{input_width}x{input_height}"),
+        "-framerate",
+        &fps.to_string(),
+        "-i",
+        "pipe:0",
+    ]);
+
+    if audio_enabled {
+        let device = audio_input_id
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| "请选择音频输入设备".to_string())?;
+        command.args(["-thread_queue_size", "512"]);
+        #[cfg(target_os = "windows")]
+        command
+            .args(["-f", "dshow", "-i"])
+            .arg(format!("audio={device}"));
+        #[cfg(target_os = "macos")]
+        command
+            .args(["-f", "avfoundation", "-i"])
+            .arg(format!(":{device}"));
+        #[cfg(target_os = "linux")]
+        command.args(["-f", "pulse", "-i", device]);
+        command.args(["-map", "0:v:0", "-map", "1:a:0"]);
+    } else {
+        command.arg("-an");
+    }
+
+    command.args([
+        "-vf",
+        &filter,
+        "-r",
+        &fps.to_string(),
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-b:v",
+        &format!("{bitrate_kbps}k"),
+        "-maxrate",
+        &format!("{bitrate_kbps}k"),
+        "-bufsize",
+        &format!("{}k", bitrate_kbps.saturating_mul(2)),
+        "-pix_fmt",
+        "yuv420p",
+        "-movflags",
+        "+faststart",
+    ]);
+    if audio_enabled {
+        command.args([
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-ar",
+            "48000",
+            "-ac",
+            "2",
+            "-shortest",
+        ]);
+    }
     command
-        .args([
-            "-y",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            "rgba",
-            "-video_size",
-            &format!("{input_width}x{input_height}"),
-            "-framerate",
-            &fps.to_string(),
-            "-i",
-            "pipe:0",
-            "-an",
-            "-vf",
-            &filter,
-            "-r",
-            &fps.to_string(),
-            "-c:v",
-            "libx264",
-            "-preset",
-            "veryfast",
-            "-b:v",
-            &format!("{bitrate_kbps}k"),
-            "-maxrate",
-            &format!("{bitrate_kbps}k"),
-            "-bufsize",
-            &format!("{}k", bitrate_kbps.saturating_mul(2)),
-            "-pix_fmt",
-            "yuv420p",
-            "-movflags",
-            "+faststart",
-        ])
         .arg(path)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(Stdio::piped());
     apply_no_window(&mut command);
     let mut child = command
         .spawn()
@@ -1366,7 +1595,16 @@ fn spawn_ffmpeg(
         .stdin
         .take()
         .ok_or_else(|| "无法连接 FFmpeg 输入流".to_string())?;
-    Ok((child, stdin))
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "无法读取 FFmpeg 错误输出".to_string())?;
+    let stderr_join = thread::spawn(move || {
+        let mut output = String::new();
+        let _ = stderr.read_to_string(&mut output);
+        output
+    });
+    Ok((child, stdin, stderr_join))
 }
 
 fn normalize_capture_region(
@@ -1477,6 +1715,7 @@ fn encode_monitor_recording(
     region: Option<CaptureRegion>,
     mut child: Child,
     mut stdin: ChildStdin,
+    stderr_join: JoinHandle<String>,
     stop_rx: Receiver<()>,
     fps: u32,
     path: PathBuf,
@@ -1553,11 +1792,19 @@ fn encode_monitor_recording(
     let status = child
         .wait()
         .map_err(|error| format!("等待 FFmpeg 结束失败：{error}"))?;
+    let ffmpeg_error = stderr_join.join().unwrap_or_default();
     if let Some(error) = stream_error {
         return Err(error);
     }
     if !status.success() {
-        return Err("FFmpeg 编码失败，请确认当前 FFmpeg 支持 H.264/libx264".into());
+        return Err(format!(
+            "FFmpeg 编码失败，请检查编码器和音频输入设备。{}",
+            if ffmpeg_error.trim().is_empty() {
+                String::new()
+            } else {
+                format!(" {}", ffmpeg_error.trim())
+            }
+        ));
     }
     finish_recording_result(path, started.elapsed().as_secs(), last_preview_jpeg)
 }
@@ -1568,6 +1815,7 @@ fn encode_window_recording(
     first_image: RgbaImage,
     mut child: Child,
     mut stdin: ChildStdin,
+    stderr_join: JoinHandle<String>,
     stop_rx: Receiver<()>,
     fps: u32,
     path: PathBuf,
@@ -1633,11 +1881,19 @@ fn encode_window_recording(
     let status = child
         .wait()
         .map_err(|error| format!("等待 FFmpeg 结束失败：{error}"))?;
+    let ffmpeg_error = stderr_join.join().unwrap_or_default();
     if let Some(error) = stream_error {
         return Err(error);
     }
     if !status.success() {
-        return Err("FFmpeg 编码失败，请确认当前 FFmpeg 支持 H.264/libx264".into());
+        return Err(format!(
+            "FFmpeg 编码失败，请检查编码器和音频输入设备。{}",
+            if ffmpeg_error.trim().is_empty() {
+                String::new()
+            } else {
+                format!(" {}", ffmpeg_error.trim())
+            }
+        ));
     }
     finish_recording_result(path, started.elapsed().as_secs(), last_preview_jpeg)
 }
@@ -1751,7 +2007,7 @@ fn prepare_recording(
         "ToolDock-{}.mp4",
         Local::now().format("%Y%m%d-%H%M%S")
     ));
-    let (child, stdin) = match spawn_ffmpeg(
+    let (child, stdin, stderr_join) = match spawn_ffmpeg(
         &ffmpeg,
         input_width,
         input_height,
@@ -1759,6 +2015,8 @@ fn prepare_recording(
         output_height,
         config.fps,
         config.bitrate_kbps,
+        config.audio_enabled,
+        config.audio_input_id.as_deref(),
         &path,
     ) {
         Ok(process) => process,
@@ -1787,6 +2045,7 @@ fn prepare_recording(
             region,
             child,
             stdin,
+            stderr_join,
             stop_rx,
             fps,
             thread_path,
@@ -1801,6 +2060,7 @@ fn prepare_recording(
             first_image,
             child,
             stdin,
+            stderr_join,
             stop_rx,
             fps,
             thread_path,
@@ -1913,9 +2173,15 @@ pub fn run() {
         .manage(RegionSelectorState::default())
         .manage(RecordingState::default())
         .setup(|app| {
-            let show_item = MenuItem::with_id(app, "show", "显示 ToolDock", true, None::<&str>)?;
-            let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+            let settings = read_settings();
+            let (show_label, quit_label) = tray_labels(&settings.language);
+            let show_item = MenuItem::with_id(app, "show", show_label, true, None::<&str>)?;
+            let quit_item = MenuItem::with_id(app, "quit", quit_label, true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
+            app.manage(TrayMenuState {
+                show_item,
+                quit_item,
+            });
             let mut tray = TrayIconBuilder::new()
                 .menu(&menu)
                 .show_menu_on_left_click(false)
@@ -1974,6 +2240,7 @@ pub fn run() {
             finish_color_picker,
             list_capture_windows,
             recording_capabilities,
+            list_audio_inputs,
             start_recording,
             recording_status,
             stop_recording,

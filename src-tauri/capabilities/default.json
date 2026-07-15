@@ -20,6 +20,24 @@
           "url": "https://tools.routemarket.ai/?utm_source=tooldock&utm_medium=desktop_app&utm_campaign=sidebar_promo&utm_content=tools"
         }
       ]
-    }
+    },
+    {
+      "identifier": "opener:allow-open-path",
+      "allow": [
+        {
+          "path": "$HOME/**"
+        },
+        {
+          "path": "$VIDEO/**"
+        },
+        {
+          "path": "$DOWNLOAD/**"
+        },
+        {
+          "path": "$TEMP/**"
+        }
+      ]
+    },
+    "opener:allow-reveal-item-in-dir"
   ]
 }

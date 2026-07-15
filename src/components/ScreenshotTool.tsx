@@ -15,6 +15,7 @@ import {
   listScreenshotHistory,
   selectDesktopRegion,
 } from "../lib/native";
+import { createTranslator, localeFor } from "../i18n";
 import type {
   AppSettings,
   MonitorInfo,
@@ -33,6 +34,8 @@ export function ScreenshotTool({
   shortcutTrigger: number;
   onStatus: (value: string) => void;
 }) {
+  const t = createTranslator(settings.language);
+  const locale = localeFor(settings.language);
   const [monitors, setMonitors] = useState<MonitorInfo[]>([]);
   const [monitorId, setMonitorId] = useState(0);
   const [mode, setMode] = useState<CaptureMode>("full");
@@ -65,14 +68,18 @@ export function ScreenshotTool({
   function remember(result: ScreenshotResult) {
     setLastShot(result);
     setHistory((current) => [result, ...current.filter((item) => item.path !== result.path)].slice(0, 20));
-    onStatus("截图已保存并复制");
+    onStatus(t("screenshot.saved"));
   }
 
   async function capture(requestedMode: CaptureMode = mode, requestedDelay = delay) {
     if (loading) return;
     setLoading(true);
     setError("");
-    onStatus(requestedDelay ? `${requestedDelay} 秒后截图` : "正在截图");
+    onStatus(
+      requestedDelay
+        ? t("screenshot.delayed", { count: requestedDelay })
+        : t("screenshot.capturingStatus"),
+    );
     try {
       if (requestedDelay) {
         await new Promise((resolve) => window.setTimeout(resolve, requestedDelay * 1000));
@@ -80,7 +87,7 @@ export function ScreenshotTool({
       if (requestedMode === "region") {
         const selection = await selectDesktopRegion("screenshot");
         if (!selection) {
-          onStatus("区域截图已取消");
+          onStatus(t("screenshot.cancelled"));
           return;
         }
         remember(await finishRegionCapture(selection, settings.screenshotDir));
@@ -89,7 +96,7 @@ export function ScreenshotTool({
       }
     } catch (reason) {
       setError(String(reason));
-      onStatus("截图失败");
+      onStatus(t("screenshot.failed"));
     } finally {
       setLoading(false);
     }
@@ -104,48 +111,52 @@ export function ScreenshotTool({
 
   return (
     <section className="tool-page">
-      <ToolHeader icon={Camera} title="截图" description="截取完整显示器或自由选择屏幕区域。" />
+      <ToolHeader
+        icon={Camera}
+        title={t("screenshot.title")}
+        description={t("screenshot.description")}
+      />
 
       <div className="screenshot-layout">
         <div className="capture-preview">
           {lastShot?.dataUrl ? (
-            <img src={lastShot.dataUrl} alt="最近截图" />
+            <img src={lastShot.dataUrl} alt={t("screenshot.latestAlt")} />
           ) : (
             <div className="monitor-placeholder">
               <span className="monitor-frame">
                 <Monitor size={56} strokeWidth={1.2} />
               </span>
-              <strong>准备捕获屏幕</strong>
-              <p>开始时主窗口会暂时隐藏</p>
+              <strong>{t("screenshot.ready")}</strong>
+              <p>{t("screenshot.hideHint")}</p>
             </div>
           )}
         </div>
 
         <div className="control-panel capture-controls">
           <div>
-            <span className="panel-label">截图模式</span>
+            <span className="panel-label">{t("screenshot.mode")}</span>
             <div className="segmented capture-mode">
               <button className={mode === "full" ? "active" : ""} onClick={() => setMode("full")}>
                 <Monitor size={14} />
-                完整显示器
+                {t("screenshot.full")}
               </button>
               <button className={mode === "region" ? "active" : ""} onClick={() => setMode("region")}>
                 <Crop size={14} />
-                选择区域
+                {t("screenshot.selectRegion")}
               </button>
             </div>
           </div>
 
           {mode === "full" ? (
             <label>
-              <span className="panel-label">显示器</span>
+              <span className="panel-label">{t("common.display")}</span>
               <span className="select-wrap">
                 <Monitor size={17} />
                 <select value={monitorId} onChange={(event) => setMonitorId(Number(event.target.value))}>
                   {monitors.map((monitor) => (
                     <option value={monitor.id} key={monitor.id}>
                       {monitor.name} · {monitor.width}×{monitor.height}
-                      {monitor.isPrimary ? "（主）" : ""}
+                      {monitor.isPrimary ? ` (${t("common.primary")})` : ""}
                     </option>
                   ))}
                 </select>
@@ -156,14 +167,14 @@ export function ScreenshotTool({
             <div className="capture-region-hint">
               <Crop size={17} />
               <span>
-                <strong>支持全部显示器</strong>
-                <small>开始后在任意屏幕拖拽框选，选区限制在当前显示器内</small>
+                <strong>{t("screenshot.allDisplays")}</strong>
+                <small>{t("screenshot.regionHint")}</small>
               </span>
             </div>
           )}
 
           <div>
-            <span className="panel-label">延时</span>
+            <span className="panel-label">{t("screenshot.delay")}</span>
             <div className="segmented">
               {[0, 3, 5].map((value) => (
                 <button
@@ -171,7 +182,7 @@ export function ScreenshotTool({
                   key={value}
                   onClick={() => setDelay(value)}
                 >
-                  {value ? `${value} 秒` : "无"}
+                  {value ? t("common.seconds", { count: value }) : t("common.none")}
                 </button>
               ))}
             </div>
@@ -179,7 +190,11 @@ export function ScreenshotTool({
 
           <button className="primary-button wide capture-button" onClick={() => capture()} disabled={loading}>
             {loading ? <LoaderCircle className="spin" size={18} /> : mode === "full" ? <Camera size={18} /> : <Crop size={18} />}
-            {loading ? "正在捕获…" : mode === "full" ? "截取显示器" : "在桌面上框选区域"}
+            {loading
+              ? t("screenshot.capturing")
+              : mode === "full"
+                ? t("screenshot.captureDisplay")
+                : t("screenshot.captureRegion")}
           </button>
 
           {lastShot && (
@@ -198,8 +213,12 @@ export function ScreenshotTool({
       <div className="history-section screenshot-history">
         <div className="section-title">
           <div>
-            <strong>截图历史</strong>
-            <span>{history.length ? `最近 ${history.length} 张` : "当前目录暂无截图"}</span>
+            <strong>{t("screenshot.history")}</strong>
+            <span>
+              {history.length
+                ? t("screenshot.recent", { count: history.length })
+                : t("screenshot.empty")}
+            </span>
           </div>
           <small className="directory-hint" title={settings.screenshotDir}>
             {settings.screenshotDir}
@@ -212,7 +231,7 @@ export function ScreenshotTool({
                 {item.dataUrl ? <img src={item.dataUrl} alt="" /> : <ImageIcon size={24} />}
                 <span>
                   <strong>{item.width} × {item.height}</strong>
-                  <small>{new Date(item.createdAt).toLocaleString()}</small>
+                  <small>{new Date(item.createdAt).toLocaleString(locale)}</small>
                 </span>
               </button>
             ))}
@@ -220,7 +239,7 @@ export function ScreenshotTool({
         ) : (
           <div className="compact-empty">
             <ImageIcon size={22} />
-            完成第一张截图后会显示在这里
+            {t("screenshot.first")}
           </div>
         )}
       </div>
