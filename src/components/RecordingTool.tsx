@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from "react";
 import {
   AppWindow,
   Check,
-  ChevronDown,
   Circle,
   Copy,
   Crop,
@@ -46,6 +45,7 @@ import type {
   RecordingPreview,
   RecordingResult,
 } from "../types";
+import { SelectMenu } from "./SelectMenu";
 import { ToolHeader } from "./ToolHeader";
 
 const resolutions = [
@@ -380,21 +380,17 @@ export function RecordingTool({
           {sourceMode === "monitor" && (
             <label>
               <span className="panel-label">{t("common.display")}</span>
-              <span className="select-wrap">
-                <Monitor size={17} />
-                <select
-                  value={monitorId}
-                  disabled={active}
-                  onChange={(event) => setMonitorId(Number(event.target.value))}
-                >
-                  {monitors.map((monitor) => (
-                    <option value={monitor.id} key={monitor.id}>
-                      {monitor.name} · {monitor.width}×{monitor.height}
-                    </option>
-                  ))}
-                </select>
-                <ChevronDown size={16} />
-              </span>
+              <SelectMenu
+                value={String(monitorId)}
+                ariaLabel={t("common.display")}
+                icon={<Monitor size={17} />}
+                disabled={active}
+                options={monitors.map((monitor) => ({
+                  value: String(monitor.id),
+                  label: `${monitor.name} · ${monitor.width}×${monitor.height}`,
+                }))}
+                onChange={(value) => setMonitorId(Number(value))}
+              />
             </label>
           )}
 
@@ -444,41 +440,37 @@ export function RecordingTool({
                   <RefreshCw size={13} />
                 </button>
               </span>
-              <span className="select-wrap">
-                <AppWindow size={17} />
-                <select
-                  value={windowId ?? ""}
-                  disabled={active || windows.length === 0}
-                  onChange={(event) => setWindowId(Number(event.target.value))}
-                >
-                  {windows.length === 0 ? (
-                    <option value="">{t("recording.noWindows")}</option>
-                  ) : (
-                    windows.map((item) => (
-                      <option value={item.id} key={item.id}>
-                        {item.appName} · {item.title} · {item.width}×{item.height}
-                      </option>
-                    ))
-                  )}
-                </select>
-                <ChevronDown size={16} />
-              </span>
+              <SelectMenu
+                value={String(windowId ?? "")}
+                ariaLabel={t("common.window")}
+                icon={<AppWindow size={17} />}
+                disabled={active || windows.length === 0}
+                options={
+                  windows.length === 0
+                    ? [{ value: "", label: t("recording.noWindows") }]
+                    : windows.map((item) => ({
+                        value: String(item.id),
+                        label: `${item.appName} · ${item.title} · ${item.width}×${item.height}`,
+                      }))
+                }
+                onChange={(value) => setWindowId(Number(value))}
+              />
             </label>
           )}
 
           <label>
             <span className="panel-label">{t("recording.resolution")}</span>
-            <span className="select-wrap">
-              <Film size={17} />
-              <select value={resolution} disabled={active} onChange={(event) => setResolution(event.target.value)}>
-                {resolutions.map((item) => (
-                  <option key={item.id} value={item.id}>
-                    {item.id === "native" ? t("recording.nativeResolution") : item.label}
-                  </option>
-                ))}
-              </select>
-              <ChevronDown size={16} />
-            </span>
+            <SelectMenu
+              value={resolution}
+              ariaLabel={t("recording.resolution")}
+              icon={<Film size={17} />}
+              disabled={active}
+              options={resolutions.map((item) => ({
+                value: item.id,
+                label: item.id === "native" ? t("recording.nativeResolution") : (item.label ?? ""),
+              }))}
+              onChange={setResolution}
+            />
           </label>
 
           <div className="recording-option-grid">
@@ -499,17 +491,18 @@ export function RecordingTool({
             </div>
             <label>
               <span className="panel-label">{t("recording.bitrate")}</span>
-              <span className="select-wrap compact-select">
-                <Gauge size={16} />
-                <select value={bitrate} disabled={active} onChange={(event) => setBitrate(Number(event.target.value))}>
-                  {[4_000, 8_000, 12_000, 20_000].map((value) => (
-                    <option key={value} value={value}>
-                      {value / 1000} Mbps
-                    </option>
-                  ))}
-                </select>
-                <ChevronDown size={15} />
-              </span>
+              <SelectMenu
+                className="compact-select"
+                value={String(bitrate)}
+                ariaLabel={t("recording.bitrate")}
+                icon={<Gauge size={16} />}
+                disabled={active}
+                options={[4_000, 8_000, 12_000, 20_000].map((value) => ({
+                  value: String(value),
+                  label: `${value / 1000} Mbps`,
+                }))}
+                onChange={(value) => setBitrate(Number(value))}
+              />
             </label>
           </div>
 
@@ -544,26 +537,23 @@ export function RecordingTool({
                   <RefreshCw size={13} />
                 </button>
               </span>
-              <span className="select-wrap">
-                {audioEnabled ? <Mic size={17} /> : <VolumeX size={17} />}
-                <select
-                  value={audioInputId}
-                  disabled={active || !audioEnabled || audioInputs.length === 0}
-                  onChange={(event) => setAudioInputId(event.target.value)}
-                >
-                  {audioInputs.length === 0 ? (
-                    <option value="">{t("recording.noAudioDevices")}</option>
-                  ) : (
-                    audioInputs.map((item) => (
-                      <option value={item.id} key={item.id}>
-                        {item.name}
-                        {item.isDefault ? ` (${t("recording.defaultAudio")})` : ""}
-                      </option>
-                    ))
-                  )}
-                </select>
-                <ChevronDown size={16} />
-              </span>
+              <SelectMenu
+                value={audioInputId}
+                ariaLabel={t("recording.audioSource")}
+                icon={audioEnabled ? <Mic size={17} /> : <VolumeX size={17} />}
+                disabled={active || !audioEnabled || audioInputs.length === 0}
+                options={
+                  audioInputs.length === 0
+                    ? [{ value: "", label: t("recording.noAudioDevices") }]
+                    : audioInputs.map((item) => ({
+                        value: item.id,
+                        label: `${item.name}${
+                          item.isDefault ? ` (${t("recording.defaultAudio")})` : ""
+                        }`,
+                      }))
+                }
+                onChange={setAudioInputId}
+              />
             </label>
           </div>
 
