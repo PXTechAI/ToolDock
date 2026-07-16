@@ -103,7 +103,8 @@ jobs:
         env:
           TOOLDOCK_TARGET_TRIPLE: ${{ matrix.target }}
 
-      - name: Validate Apple signing configuration
+      - name: Detect Apple signing configuration
+        id: apple-signing
         if: runner.os == 'macOS'
         shell: bash
         env:
@@ -114,6 +115,7 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           missing=()
+          configured=0
           for name in \
             APPLE_CERTIFICATE \
             APPLE_CERTIFICATE_PASSWORD \
@@ -121,18 +123,25 @@ jobs:
             APPLE_PASSWORD \
             APPLE_TEAM_ID
           do
-            if [[ -z "${!name}" ]]; then
+            if [[ -n "${!name}" ]]; then
+              configured=$((configured + 1))
+            else
               missing+=("$name")
             fi
           done
 
-          if (( ${#missing[@]} > 0 )); then
+          if (( configured == 0 )); then
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Apple signing secrets are not configured; building unsigned macOS test artifacts."
+          elif (( ${#missing[@]} > 0 )); then
             echo "::error::Missing Apple release-signing secrets: ${missing[*]}"
             exit 1
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Import Apple Developer ID certificate
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && steps.apple-signing.outputs.enabled == 'true'
         shell: bash
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -195,7 +204,7 @@ jobs:
           args: ${{ matrix.args }}
 
       - name: Verify macOS signature and notarization
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && steps.apple-signing.outputs.enabled == 'true'
         shell: bash
         run: |
           app_path="src-tauri/target/${{ matrix.target }}/release/bundle/macos/ToolDock.app"
@@ -209,7 +218,7 @@ jobs:
           xcrun stapler validate "$app_path"
 
       - name: Remove temporary Apple signing keychain
-        if: always() && runner.os == 'macOS'
+        if: always() && runner.os == 'macOS' && steps.apple-signing.outputs.enabled == 'true'
         shell: bash
         run: |
           if [[ -n "${TOOLDOCK_KEYCHAIN_PATH:-}" ]]; then
