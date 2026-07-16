@@ -4,31 +4,41 @@ import {
   Check,
   ChevronDown,
   Circle,
+  Copy,
   Crop,
   Film,
   FileVideo,
+  FolderOpen,
   Gauge,
   HardDrive,
   LoaderCircle,
+  Mic,
   Monitor,
+  Play,
   RefreshCw,
   Square,
   Timer,
   Video,
+  VolumeX,
 } from "lucide-react";
 import {
   getRecordingCapabilities,
   getRecordingStatus,
+  listAudioInputs,
   listRecordingHistory,
   listCaptureWindows,
   listMonitors,
   listenRecordingPreview,
+  openLocalPath,
+  revealLocalPath,
   selectDesktopRegion,
   startRecording,
   stopRecording,
 } from "../lib/native";
+import { createTranslator, localeFor } from "../i18n";
 import type {
   AppSettings,
+  AudioInputInfo,
   CaptureWindowInfo,
   DesktopRegionSelection,
   MonitorInfo,
@@ -39,7 +49,7 @@ import type {
 import { ToolHeader } from "./ToolHeader";
 
 const resolutions = [
-  { id: "native", label: "原始分辨率" },
+  { id: "native" },
   { id: "1080p", label: "1920 × 1080", width: 1920, height: 1080 },
   { id: "720p", label: "1280 × 720", width: 1280, height: 720 },
 ];
@@ -66,6 +76,8 @@ export function RecordingTool({
   shortcutTrigger: number;
   onStatus: (value: string) => void;
 }) {
+  const t = createTranslator(settings.language);
+  const locale = localeFor(settings.language);
   const [monitors, setMonitors] = useState<MonitorInfo[]>([]);
   const [monitorId, setMonitorId] = useState(0);
   const [sourceMode, setSourceMode] = useState<RecordingSourceMode>("monitor");
@@ -75,6 +87,9 @@ export function RecordingTool({
   const [resolution, setResolution] = useState("native");
   const [fps, setFps] = useState(30);
   const [bitrate, setBitrate] = useState(8_000);
+  const [audioEnabled, setAudioEnabled] = useState(false);
+  const [audioInputs, setAudioInputs] = useState<AudioInputInfo[]>([]);
+  const [audioInputId, setAudioInputId] = useState("");
   const [capabilities, setCapabilities] = useState<RecordingCapabilities | null>(null);
   const [active, setActive] = useState(false);
   const [elapsed, setElapsed] = useState(0);
@@ -84,6 +99,11 @@ export function RecordingTool({
   const [history, setHistory] = useState<RecordingResult[]>([]);
   const [error, setError] = useState("");
   const [ready, setReady] = useState(false);
+  const [contextMenu, setContextMenu] = useState<{
+    path: string;
+    x: number;
+    y: number;
+  } | null>(null);
   const handledShortcut = useRef(0);
 
   async function refreshCapabilities() {
@@ -99,20 +119,32 @@ export function RecordingTool({
     });
   }
 
+  async function refreshAudioInputs() {
+    const items = await listAudioInputs();
+    setAudioInputs(items);
+    setAudioInputId((current) => {
+      if (current && items.some((item) => item.id === current)) return current;
+      return items.find((item) => item.isDefault)?.id ?? items[0]?.id ?? "";
+    });
+  }
+
   useEffect(() => {
     Promise.all([
       listMonitors(),
       getRecordingCapabilities(),
       getRecordingStatus(),
       listCaptureWindows(),
+      listAudioInputs(),
     ])
-      .then(([items, capability, status, windowItems]) => {
+      .then(([items, capability, status, windowItems, audioItems]) => {
         setMonitors(items);
         setCapabilities(capability);
         setActive(status.active);
         setElapsed(status.elapsedSeconds);
         setWindows(windowItems);
         setWindowId(windowItems[0]?.id ?? null);
+        setAudioInputs(audioItems);
+        setAudioInputId(audioItems.find((item) => item.isDefault)?.id ?? audioItems[0]?.id ?? "");
         const primary = items.find((item) => item.isPrimary);
         if (primary) setMonitorId(primary.id);
         setReady(true);
@@ -122,6 +154,17 @@ export function RecordingTool({
         setReady(true);
       });
   }, []);
+
+  useEffect(() => {
+    if (!contextMenu) return;
+    const close = () => setContextMenu(null);
+    window.addEventListener("pointerdown", close);
+    window.addEventListener("blur", close);
+    return () => {
+      window.removeEventListener("pointerdown", close);
+      window.removeEventListener("blur", close);
+    };
+  }, [contextMenu]);
 
   useEffect(() => {
     let disposed = false;
@@ -157,13 +200,13 @@ export function RecordingTool({
     const selectedResolution = resolutions.find((item) => item.id === resolution);
     setLoading(true);
     setError("");
-    onStatus("正在启动录屏");
+    onStatus(t("recording.starting"));
     try {
       let source;
       if (sourceMode === "region") {
         const selection = selectedRegion ?? (await selectDesktopRegion("recording"));
         if (!selection) {
-          onStatus("区域录制已取消");
+          onStatus(t("recording.regionCancelled"));
           return;
         }
         setSelectedRegion(selection);
@@ -174,7 +217,7 @@ export function RecordingTool({
         };
       } else if (sourceMode === "window") {
         if (windowId === null) {
-          throw new Error("请选择要录制的应用窗口");
+          throw new Error(t("recording.chooseWindow"));
         }
         source = { kind: "window" as const, windowId };
       } else {
@@ -186,15 +229,17 @@ export function RecordingTool({
         height: selectedResolution?.height,
         fps,
         bitrateKbps: bitrate,
+        audioEnabled,
+        audioInputId: audioEnabled ? audioInputId : undefined,
         outputDirectory: settings.recordingDir,
       });
       setPreview(null);
       setElapsed(0);
       setActive(true);
-      onStatus("屏幕录制中");
+      onStatus(t("recording.active"));
     } catch (reason) {
       setError(String(reason));
-      onStatus("录屏启动失败");
+      onStatus(t("recording.startFailed"));
     } finally {
       setLoading(false);
     }
@@ -202,7 +247,7 @@ export function RecordingTool({
 
   async function stop() {
     setLoading(true);
-    onStatus("正在完成视频编码");
+    onStatus(t("recording.finishing"));
     try {
       const result = await stopRecording();
       setLastRecording(result);
@@ -214,10 +259,10 @@ export function RecordingTool({
       setHistory((items) => [result, ...items.filter((item) => item.path !== result.path)].slice(0, 20));
       setActive(false);
       setElapsed(result.durationSeconds);
-      onStatus("录屏已保存");
+      onStatus(t("recording.saved"));
     } catch (reason) {
       setError(String(reason));
-      onStatus("停止录屏失败");
+      onStatus(t("recording.stopFailed"));
     } finally {
       setLoading(false);
     }
@@ -236,11 +281,14 @@ export function RecordingTool({
   const sourceLabel =
     sourceMode === "region"
       ? selectedRegion
-        ? `区域 ${selectedRegion.region.width} × ${selectedRegion.region.height}`
-        : "自定义区域"
+        ? t("recording.regionSize", {
+            width: selectedRegion.region.width,
+            height: selectedRegion.region.height,
+          })
+        : t("recording.customRegion")
       : sourceMode === "window"
-        ? selectedWindow?.appName || "应用窗口"
-        : monitors.find((item) => item.id === monitorId)?.name || "显示器";
+        ? selectedWindow?.appName || t("common.window")
+        : monitors.find((item) => item.id === monitorId)?.name || t("common.display");
   const SourceIcon = sourceMode === "region" ? Crop : sourceMode === "window" ? AppWindow : Monitor;
   const stageImage = active ? preview?.dataUrl : lastRecording?.thumbnailDataUrl || preview?.dataUrl;
 
@@ -248,10 +296,10 @@ export function RecordingTool({
     <section className="tool-page">
       <ToolHeader
         icon={Video}
-        title="屏幕录制"
-        description="录制显示器、自定义区域或独立应用窗口，并编码为 H.264 MP4。"
+        title={t("recording.title")}
+        description={t("recording.description")}
         action={
-          <button className="icon-button" title="重新检测 FFmpeg" onClick={refreshCapabilities}>
+          <button className="icon-button" title={t("recording.refreshFfmpeg")} onClick={refreshCapabilities}>
             <RefreshCw size={17} />
           </button>
         }
@@ -261,7 +309,7 @@ export function RecordingTool({
         <div className={active ? "recording-stage active" : "recording-stage"}>
           {stageImage ? (
             <>
-              <img className="recording-preview-image" src={stageImage} alt="录屏预览" />
+              <img className="recording-preview-image" src={stageImage} alt={t("recording.preview")} />
               <div className="recording-preview-overlay">
                 {active && (
                   <span className="recording-live">
@@ -272,7 +320,9 @@ export function RecordingTool({
                 <span className="recording-time compact">{displayTimeText}</span>
               </div>
               <div className="recording-preview-caption">
-                <strong>{active ? `正在录制：${sourceLabel}` : "录屏预览"}</strong>
+                <strong>
+                  {active ? t("recording.recording", { source: sourceLabel }) : t("recording.preview")}
+                </strong>
                 <small>{active ? sourceLabel : lastRecording?.path}</small>
               </div>
             </>
@@ -281,12 +331,16 @@ export function RecordingTool({
               <span className="recording-monitor">
                 <SourceIcon size={64} strokeWidth={1.15} />
               </span>
-              <strong>{active ? `正在等待画面：${sourceLabel}` : `准备录制：${sourceLabel}`}</strong>
+              <strong>
+                {active
+                  ? t("recording.waitingFrame", { source: sourceLabel })
+                  : t("recording.readySource", { source: sourceLabel })}
+              </strong>
               <div className="recording-time">{displayTimeText}</div>
               <p>
                 {active
-                  ? "首个实时预览帧即将显示"
-                  : "开始前请确认录制来源和编码参数"}
+                  ? t("recording.firstFrame")
+                  : t("recording.checkOptions")}
               </p>
             </>
           )}
@@ -294,7 +348,7 @@ export function RecordingTool({
 
         <div className="control-panel recording-controls">
           <div>
-            <span className="panel-label">录制来源</span>
+            <span className="panel-label">{t("recording.source")}</span>
             <div className="segmented recording-source">
               <button
                 className={sourceMode === "monitor" ? "active" : ""}
@@ -302,7 +356,7 @@ export function RecordingTool({
                 onClick={() => setSourceMode("monitor")}
               >
                 <Monitor size={14} />
-                显示器
+                {t("common.display")}
               </button>
               <button
                 className={sourceMode === "region" ? "active" : ""}
@@ -310,7 +364,7 @@ export function RecordingTool({
                 onClick={() => setSourceMode("region")}
               >
                 <Crop size={14} />
-                区域
+                {t("common.region")}
               </button>
               <button
                 className={sourceMode === "window" ? "active" : ""}
@@ -318,14 +372,14 @@ export function RecordingTool({
                 onClick={() => setSourceMode("window")}
               >
                 <AppWindow size={14} />
-                应用窗口
+                {t("common.window")}
               </button>
             </div>
           </div>
 
           {sourceMode === "monitor" && (
             <label>
-              <span className="panel-label">显示器</span>
+              <span className="panel-label">{t("common.display")}</span>
               <span className="select-wrap">
                 <Monitor size={17} />
                 <select
@@ -346,7 +400,7 @@ export function RecordingTool({
 
           {sourceMode === "region" && (
             <div>
-              <span className="panel-label">录制区域</span>
+              <span className="panel-label">{t("recording.recordRegion")}</span>
               <button
                 className="source-picker-button"
                 disabled={active}
@@ -361,11 +415,13 @@ export function RecordingTool({
               >
                 <Crop size={17} />
                 <span>
-                  <strong>{selectedRegion ? "已选择区域" : "在桌面上框选区域"}</strong>
+                  <strong>
+                    {selectedRegion ? t("recording.selectedRegion") : t("recording.pickRegion")}
+                  </strong>
                   <small>
                     {selectedRegion
                       ? `${selectedRegion.monitorName} · ${selectedRegion.region.width}×${selectedRegion.region.height}`
-                      : "所有显示器会显示遮罩，拖拽完成框选"}
+                      : t("recording.regionOverlay")}
                   </small>
                 </span>
               </button>
@@ -375,10 +431,10 @@ export function RecordingTool({
           {sourceMode === "window" && (
             <label>
               <span className="panel-label source-label-row">
-                <span>应用窗口</span>
+                <span>{t("common.window")}</span>
                 <button
                   className="inline-icon-button"
-                  title="刷新应用窗口"
+                  title={t("recording.refreshWindows")}
                   disabled={active}
                   onClick={(event) => {
                     event.preventDefault();
@@ -396,7 +452,7 @@ export function RecordingTool({
                   onChange={(event) => setWindowId(Number(event.target.value))}
                 >
                   {windows.length === 0 ? (
-                    <option value="">没有可录制的应用窗口</option>
+                    <option value="">{t("recording.noWindows")}</option>
                   ) : (
                     windows.map((item) => (
                       <option value={item.id} key={item.id}>
@@ -411,13 +467,13 @@ export function RecordingTool({
           )}
 
           <label>
-            <span className="panel-label">输出分辨率</span>
+            <span className="panel-label">{t("recording.resolution")}</span>
             <span className="select-wrap">
               <Film size={17} />
               <select value={resolution} disabled={active} onChange={(event) => setResolution(event.target.value)}>
                 {resolutions.map((item) => (
                   <option key={item.id} value={item.id}>
-                    {item.label}
+                    {item.id === "native" ? t("recording.nativeResolution") : item.label}
                   </option>
                 ))}
               </select>
@@ -427,7 +483,7 @@ export function RecordingTool({
 
           <div className="recording-option-grid">
             <div>
-              <span className="panel-label">帧率</span>
+              <span className="panel-label">{t("recording.fps")}</span>
               <div className="segmented two">
                 {[30, 60].map((value) => (
                   <button
@@ -442,7 +498,7 @@ export function RecordingTool({
               </div>
             </div>
             <label>
-              <span className="panel-label">视频码率</span>
+              <span className="panel-label">{t("recording.bitrate")}</span>
               <span className="select-wrap compact-select">
                 <Gauge size={16} />
                 <select value={bitrate} disabled={active} onChange={(event) => setBitrate(Number(event.target.value))}>
@@ -457,11 +513,75 @@ export function RecordingTool({
             </label>
           </div>
 
+          <div className="audio-recording-control">
+            <div className="toggle-row">
+              <span>
+                <strong>{t("recording.audio")}</strong>
+                <small>{t("recording.audioHint")}</small>
+              </span>
+              <button
+                className={audioEnabled ? "toggle active" : "toggle"}
+                role="switch"
+                aria-checked={audioEnabled}
+                disabled={active || audioInputs.length === 0}
+                onClick={() => setAudioEnabled((value) => !value)}
+              >
+                <span />
+              </button>
+            </div>
+            <label>
+              <span className="panel-label source-label-row">
+                <span>{t("recording.audioSource")}</span>
+                <button
+                  className="inline-icon-button"
+                  title={t("recording.refreshAudio")}
+                  disabled={active}
+                  onClick={(event) => {
+                    event.preventDefault();
+                    void refreshAudioInputs().catch((reason) => setError(String(reason)));
+                  }}
+                >
+                  <RefreshCw size={13} />
+                </button>
+              </span>
+              <span className="select-wrap">
+                {audioEnabled ? <Mic size={17} /> : <VolumeX size={17} />}
+                <select
+                  value={audioInputId}
+                  disabled={active || !audioEnabled || audioInputs.length === 0}
+                  onChange={(event) => setAudioInputId(event.target.value)}
+                >
+                  {audioInputs.length === 0 ? (
+                    <option value="">{t("recording.noAudioDevices")}</option>
+                  ) : (
+                    audioInputs.map((item) => (
+                      <option value={item.id} key={item.id}>
+                        {item.name}
+                        {item.isDefault ? ` (${t("recording.defaultAudio")})` : ""}
+                      </option>
+                    ))
+                  )}
+                </select>
+                <ChevronDown size={16} />
+              </span>
+            </label>
+          </div>
+
           <div className={capabilities?.available ? "encoder-status ready" : "encoder-status"}>
             {capabilities?.available ? <Check size={15} /> : <HardDrive size={15} />}
             <span>
-              <strong>{capabilities?.available ? "编码器可用" : "等待编码器"}</strong>
-              <small title={capabilities?.ffmpegPath}>{capabilities?.message || "正在检测 FFmpeg…"}</small>
+              <strong>
+                {capabilities?.available
+                  ? t("recording.encoderReady")
+                  : t("recording.encoderWaiting")}
+              </strong>
+              <small title={capabilities?.ffmpegPath}>
+                {capabilities?.available
+                  ? t("recording.ffmpegReady")
+                  : ready
+                    ? t("recording.ffmpegMissing")
+                    : t("recording.detectingFfmpeg")}
+              </small>
             </span>
           </div>
 
@@ -481,7 +601,11 @@ export function RecordingTool({
             ) : (
               <Circle size={17} fill="currentColor" />
             )}
-            {loading ? "正在处理…" : active ? "停止并保存" : "开始录制"}
+            {loading
+              ? t("recording.processing")
+              : active
+                ? t("recording.stop")
+                : t("recording.start")}
           </button>
 
           {error && <p className="inline-error">{error}</p>}
@@ -491,20 +615,24 @@ export function RecordingTool({
       <div className="recording-meta">
         <span>
           <Timer size={16} />
-          <strong>时长</strong>
+          <strong>{t("recording.duration")}</strong>
           <small>{displayTimeText}</small>
         </span>
         <span>
           <Gauge size={16} />
-          <strong>当前配置</strong>
+          <strong>{t("recording.currentConfig")}</strong>
           <small>
             {sourceLabel} · {fps} FPS · {bitrate / 1000} Mbps ·{" "}
-            {resolutions.find((item) => item.id === resolution)?.label}
+            {resolution === "native"
+              ? t("recording.nativeResolution")
+              : resolutions.find((item) => item.id === resolution)?.label}
+            {" · "}
+            {audioEnabled ? t("recording.audioOn") : t("recording.audioOff")}
           </small>
         </span>
         <span>
           <HardDrive size={16} />
-          <strong>保存位置</strong>
+          <strong>{t("recording.saveLocation")}</strong>
           <small title={lastRecording?.path || settings.recordingDir}>{lastRecording?.path || settings.recordingDir}</small>
         </span>
       </div>
@@ -512,8 +640,12 @@ export function RecordingTool({
       <div className="history-section recording-history">
         <div className="section-title">
           <div>
-            <strong>录屏历史</strong>
-            <span>{history.length ? `最近 ${history.length} 段` : "当前目录暂无录屏"}</span>
+            <strong>{t("recording.history")}</strong>
+            <span>
+              {history.length
+                ? t("recording.recent", { count: history.length })
+                : t("recording.empty")}
+            </span>
           </div>
           <small className="directory-hint" title={settings.recordingDir}>
             {settings.recordingDir}
@@ -531,7 +663,16 @@ export function RecordingTool({
                       ? { dataUrl: item.thumbnailDataUrl, width: 0, height: 0 }
                       : null,
                   );
+                  void openLocalPath(item.path).catch((reason) => {
+                    setError(String(reason));
+                    onStatus(t("recording.openFailed"));
+                  });
                 }}
+                onContextMenu={(event) => {
+                  event.preventDefault();
+                  setContextMenu({ path: item.path, x: event.clientX, y: event.clientY });
+                }}
+                title={t("recording.play")}
                 key={item.path}
               >
                 <span className="recording-history-thumb">
@@ -544,7 +685,7 @@ export function RecordingTool({
                 </span>
                 <span>
                   <strong title={item.path}>{item.path.split(/[\\/]/).pop()}</strong>
-                  <small>{new Date(item.createdAt).toLocaleString()}</small>
+                  <small>{new Date(item.createdAt).toLocaleString(locale)}</small>
                   <small>{formatFileSize(item.sizeBytes)}</small>
                 </span>
               </button>
@@ -553,10 +694,46 @@ export function RecordingTool({
         ) : (
           <div className="compact-empty">
             <FileVideo size={22} />
-            完成第一段录屏后会显示在这里
+            {t("recording.first")}
           </div>
         )}
       </div>
+      {contextMenu && (
+        <div
+          className="recording-context-menu"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+          onPointerDown={(event) => event.stopPropagation()}
+        >
+          <button
+            onClick={() => {
+              void openLocalPath(contextMenu.path).catch((reason) => setError(String(reason)));
+              setContextMenu(null);
+            }}
+          >
+            <Play size={15} />
+            {t("recording.play")}
+          </button>
+          <button
+            onClick={() => {
+              void navigator.clipboard.writeText(contextMenu.path);
+              onStatus(t("recording.pathCopied"));
+              setContextMenu(null);
+            }}
+          >
+            <Copy size={15} />
+            {t("recording.copyPath")}
+          </button>
+          <button
+            onClick={() => {
+              void revealLocalPath(contextMenu.path).catch((reason) => setError(String(reason)));
+              setContextMenu(null);
+            }}
+          >
+            <FolderOpen size={15} />
+            {t("recording.reveal")}
+          </button>
+        </div>
+      )}
     </section>
   );
 }

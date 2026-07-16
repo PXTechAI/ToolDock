@@ -1,9 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openPath, openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import type {
   AppSettings,
+  AudioInputInfo,
   CaptureWindowInfo,
   ColorSample,
   DesktopRegionSelection,
@@ -22,6 +23,9 @@ const inTauri = () => "__TAURI_INTERNALS__" in window;
 
 const demoSettings: AppSettings = {
   theme: "dark",
+  language: "zh-CN",
+  uiFont: "system",
+  fontScale: 1.1,
   screenshotDir: "Pictures/ToolDock",
   recordingDir: "Videos/ToolDock",
   colorShortcut: "CommandOrControl+Alt+C",
@@ -38,6 +42,20 @@ export async function openExternalUrl(url: string): Promise<void> {
     return;
   }
   await openUrl(url);
+}
+
+export async function openLocalPath(path: string): Promise<void> {
+  if (!inTauri()) {
+    throw new Error("Opening local files is only available in the desktop app.");
+  }
+  await openPath(path);
+}
+
+export async function revealLocalPath(path: string): Promise<void> {
+  if (!inTauri()) {
+    throw new Error("Revealing local files is only available in the desktop app.");
+  }
+  await revealItemInDir(path);
 }
 
 const demoProcesses: PortProcess[] = [
@@ -89,7 +107,7 @@ export async function inspectPorts(ports: number[]): Promise<PortProcess[]> {
 export async function killProcesses(pids: number[]): Promise<KillResult[]> {
   if (!inTauri()) {
     await new Promise((resolve) => window.setTimeout(resolve, 380));
-    return pids.map((pid) => ({ pid, success: true, message: "演示模式：未结束真实进程" }));
+    return pids.map((pid) => ({ pid, success: true, message: "Demo mode: no real process was terminated." }));
   }
   return invoke<KillResult[]>("kill_processes", { pids });
 }
@@ -99,7 +117,7 @@ export async function listMonitors(): Promise<MonitorInfo[]> {
     return [
       {
         id: 0,
-        name: "主显示器",
+        name: "Primary display",
         width: 2560,
         height: 1440,
         scaleFactor: 1.25,
@@ -115,7 +133,9 @@ export async function loadSettings(): Promise<AppSettings> {
     const stored = window.localStorage.getItem("tooldock-settings");
     return stored ? { ...demoSettings, ...(JSON.parse(stored) as Partial<AppSettings>) } : demoSettings;
   }
-  return invoke<AppSettings>("load_settings");
+  const settings = await invoke<AppSettings>("load_settings");
+  window.localStorage.setItem("tooldock-settings", JSON.stringify(settings));
+  return settings;
 }
 
 export async function saveSettings(settings: AppSettings): Promise<AppSettings> {
@@ -123,7 +143,9 @@ export async function saveSettings(settings: AppSettings): Promise<AppSettings> 
     window.localStorage.setItem("tooldock-settings", JSON.stringify(settings));
     return settings;
   }
-  return invoke<AppSettings>("save_settings", { settings });
+  const saved = await invoke<AppSettings>("save_settings", { settings });
+  window.localStorage.setItem("tooldock-settings", JSON.stringify(saved));
+  return saved;
 }
 
 export async function chooseDirectory(initial?: string): Promise<string | null> {
@@ -139,11 +161,11 @@ export async function captureScreenshot(
     if (!inTauri()) {
       await new Promise((resolve) => window.setTimeout(resolve, 500));
       return {
-        path: "浏览器预览模式不写入文件",
+        path: "Browser preview does not write files",
         dataUrl: "",
         width: 2560,
         height: 1440,
-        monitorName: "主显示器",
+        monitorName: "Primary display",
         createdAt: new Date().toISOString(),
       };
     }
@@ -170,7 +192,7 @@ export async function selectDesktopRegion(
   purpose: "screenshot" | "recording",
 ): Promise<DesktopRegionSelection | null> {
   if (!inTauri()) {
-    throw new Error("区域选择需要在桌面应用中使用");
+    throw new Error("Region selection is only available in the desktop app.");
   }
 
   const appWindow = getCurrentWindow();
@@ -261,7 +283,7 @@ export async function getRecordingCapabilities(): Promise<RecordingCapabilities>
   if (!inTauri()) {
     return {
       available: false,
-      message: "录屏需要在安装了 FFmpeg 的桌面应用中使用",
+      message: "Screen recording requires the desktop app and FFmpeg.",
     };
   }
   return invoke<RecordingCapabilities>("recording_capabilities");
@@ -270,6 +292,11 @@ export async function getRecordingCapabilities(): Promise<RecordingCapabilities>
 export async function listCaptureWindows(): Promise<CaptureWindowInfo[]> {
   if (!inTauri()) return [];
   return invoke<CaptureWindowInfo[]>("list_capture_windows");
+}
+
+export async function listAudioInputs(): Promise<AudioInputInfo[]> {
+  if (!inTauri()) return [];
+  return invoke<AudioInputInfo[]>("list_audio_inputs");
 }
 
 export async function startRecording(config: RecordingConfig): Promise<RecordingStatus> {

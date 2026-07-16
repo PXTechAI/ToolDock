@@ -42,7 +42,9 @@ import { RecordingTool } from "./components/RecordingTool";
 import { ScreenshotTool } from "./components/ScreenshotTool";
 import { SettingsTool } from "./components/SettingsTool";
 import { ToolHeader } from "./components/ToolHeader";
+import { createTranslator, fontFamilies } from "./i18n";
 import type {
+  AppLanguage,
   AppSettings,
   ColorSample,
   PortProcess,
@@ -51,15 +53,15 @@ import type {
 
 const tools: Array<{
   id: ToolId;
-  label: string;
-  detail: string;
+  labelKey: string;
+  detailKey: string;
   icon: typeof Palette;
 }> = [
-  { id: "color", label: "取色器", detail: "屏幕任意位置", icon: Crosshair },
-  { id: "ports", label: "端口进程", detail: "查询与批量结束", icon: Network },
-  { id: "screenshot", label: "截图", detail: "全屏、区域与历史", icon: Camera },
-  { id: "recording", label: "屏幕录制", detail: "分辨率、帧率与码率", icon: Video },
-  { id: "strings", label: "字符串生成", detail: "随机、安全、可批量", icon: WandSparkles },
+  { id: "color", labelKey: "nav.color", detailKey: "nav.colorDetail", icon: Crosshair },
+  { id: "ports", labelKey: "nav.ports", detailKey: "nav.portsDetail", icon: Network },
+  { id: "screenshot", labelKey: "nav.screenshot", detailKey: "nav.screenshotDetail", icon: Camera },
+  { id: "recording", labelKey: "nav.recording", detailKey: "nav.recordingDetail", icon: Video },
+  { id: "strings", labelKey: "nav.strings", detailKey: "nav.stringsDetail", icon: WandSparkles },
 ];
 
 const stringCharsets = {
@@ -72,6 +74,8 @@ const stringCharsets = {
 
 type StringMode = keyof typeof stringCharsets | "uuid";
 let shortcutRegistrationQueue: Promise<void> = Promise.resolve();
+const PORT_INPUT_KEY = "tooldock-port-input";
+const PORT_HISTORY_KEY = "tooldock-port-history";
 
 const routeMarketUrl =
   "https://routemarket.ai/?utm_source=tooldock&utm_medium=desktop_app&utm_campaign=sidebar_promo&utm_content=routemarket";
@@ -136,9 +140,12 @@ function copyText(value: string, setCopied: (value: string) => void) {
 
 function App() {
   const [activeTool, setActiveTool] = useState<ToolId>("ports");
-  const [status, setStatus] = useState("本地运行");
+  const [status, setStatus] = useState("");
   const [settings, setSettings] = useState<AppSettings>({
     theme: "dark",
+    language: "zh-CN",
+    uiFont: "system",
+    fontScale: 1.1,
     screenshotDir: "",
     recordingDir: "",
     colorShortcut: "CommandOrControl+Alt+C",
@@ -149,17 +156,24 @@ function App() {
   const [colorShortcutTrigger, setColorShortcutTrigger] = useState(0);
   const [screenshotShortcutTrigger, setScreenshotShortcutTrigger] = useState(0);
   const [recordingShortcutTrigger, setRecordingShortcutTrigger] = useState(0);
+  const t = createTranslator(settings.language);
 
   useEffect(() => {
     loadSettings()
-      .then((value) => setSettings(value))
-      .catch((reason) => setStatus(`设置读取失败：${String(reason)}`));
+      .then((value) => {
+        setSettings(value);
+        setStatus(createTranslator(value.language)("common.local"));
+      })
+      .catch((reason) => setStatus(t("status.settingsReadFailed", { error: String(reason) })));
   }, []);
 
   useEffect(() => {
     document.documentElement.dataset.theme = settings.theme;
     document.documentElement.style.colorScheme = settings.theme;
-  }, [settings.theme]);
+    document.documentElement.lang = settings.language;
+    document.documentElement.style.setProperty("--ui-font-family", fontFamilies[settings.uiFont]);
+    document.documentElement.style.setProperty("--ui-font-scale", String(settings.fontScale));
+  }, [settings.fontScale, settings.language, settings.theme, settings.uiFont]);
 
   useEffect(() => {
     if (!isDesktopApp()) return;
@@ -195,7 +209,7 @@ function App() {
       })
       .catch(async (reason) => {
         await unregisterAll().catch(() => undefined);
-        if (!cancelled) setStatus(`快捷键注册失败：${String(reason)}`);
+        if (!cancelled) setStatus(t("status.shortcutFailed", { error: String(reason) }));
       });
 
     return () => {
@@ -206,6 +220,7 @@ function App() {
     };
   }, [
     settings.colorShortcut,
+    settings.language,
     settings.recordingShortcut,
     settings.screenshotShortcut,
   ]);
@@ -220,18 +235,18 @@ function App() {
     const next = { ...settings, theme: settings.theme === "dark" ? "light" : "dark" } as AppSettings;
     try {
       await persistSettings(next);
-      setStatus(next.theme === "light" ? "已切换浅色模式" : "已切换深色模式");
+      setStatus(next.theme === "light" ? t("status.themeLight") : t("status.themeDark"));
     } catch (reason) {
-      setStatus(`主题保存失败：${String(reason)}`);
+      setStatus(t("status.themeFailed", { error: String(reason) }));
     }
   }
 
   async function openPromotion(url: string, label: string) {
     try {
       await openExternalUrl(url);
-      setStatus(`已打开 ${label}`);
+      setStatus(t("status.opened", { label }));
     } catch (reason) {
-      setStatus(`无法打开 ${label}：${String(reason)}`);
+      setStatus(t("status.openFailed", { label, error: String(reason) }));
     }
   }
 
@@ -246,7 +261,7 @@ function App() {
           </div>
         </div>
 
-        <nav className="tool-nav" aria-label="工具">
+        <nav className="tool-nav" aria-label={t("nav.tools")}>
           {tools.map((tool) => {
             const Icon = tool.icon;
             return (
@@ -257,8 +272,8 @@ function App() {
               >
                 <Icon size={18} strokeWidth={1.8} />
                 <span>
-                  <strong>{tool.label}</strong>
-                  <small>{tool.detail}</small>
+                  <strong>{t(tool.labelKey)}</strong>
+                  <small>{t(tool.detailKey)}</small>
                 </span>
               </button>
             );
@@ -271,7 +286,7 @@ function App() {
               <Store size={16} />
               <span>
                 <strong>RouteMarket.ai</strong>
-                <small>开发者资源市场</small>
+                <small>{t("nav.market")}</small>
               </span>
               <ExternalLink size={13} />
             </button>
@@ -279,22 +294,25 @@ function App() {
               <Wrench size={16} />
               <span>
                 <strong>RouteMarket Tools</strong>
-                <small>发现更多在线工具</small>
+                <small>{t("nav.onlineTools")}</small>
               </span>
               <ExternalLink size={13} />
             </button>
           </div>
           <div className="sidebar-actions">
-            <button onClick={toggleTheme} title={settings.theme === "dark" ? "切换浅色模式" : "切换深色模式"}>
+            <button
+              onClick={toggleTheme}
+              title={settings.theme === "dark" ? t("theme.switchLight") : t("theme.switchDark")}
+            >
               {settings.theme === "dark" ? <Sun size={17} /> : <Moon size={17} />}
-              <span>{settings.theme === "dark" ? "浅色模式" : "深色模式"}</span>
+              <span>{settings.theme === "dark" ? t("theme.light") : t("theme.dark")}</span>
             </button>
             <button
               className={activeTool === "settings" ? "active" : ""}
               onClick={() => setActiveTool("settings")}
             >
               <Settings size={17} />
-              <span>设置</span>
+              <span>{t("common.settings")}</span>
             </button>
           </div>
           <div className="sidebar-footer">
@@ -306,9 +324,13 @@ function App() {
       </aside>
 
       <main className="workspace">
-        {activeTool === "ports" && <PortsTool onStatus={setStatus} />}
+        {activeTool === "ports" && <PortsTool language={settings.language} onStatus={setStatus} />}
         {activeTool === "color" && (
-          <ColorTool shortcutTrigger={colorShortcutTrigger} onStatus={setStatus} />
+          <ColorTool
+            language={settings.language}
+            shortcutTrigger={colorShortcutTrigger}
+            onStatus={setStatus}
+          />
         )}
         {activeTool === "screenshot" && (
           <ScreenshotTool
@@ -324,7 +346,9 @@ function App() {
             onStatus={setStatus}
           />
         )}
-        {activeTool === "strings" && <StringTool onStatus={setStatus} />}
+        {activeTool === "strings" && (
+          <StringTool language={settings.language} onStatus={setStatus} />
+        )}
         {activeTool === "settings" && (
           <SettingsTool settings={settings} onSave={persistSettings} onStatus={setStatus} />
         )}
@@ -333,8 +357,24 @@ function App() {
   );
 }
 
-function PortsTool({ onStatus }: { onStatus: (value: string) => void }) {
-  const [portInput, setPortInput] = useState("3000, 5173, 8000-8003");
+function PortsTool({
+  language,
+  onStatus,
+}: {
+  language: AppLanguage;
+  onStatus: (value: string) => void;
+}) {
+  const t = createTranslator(language);
+  const [portInput, setPortInput] = useState(
+    () => window.localStorage.getItem(PORT_INPUT_KEY) || "3000, 5173, 8000-8003",
+  );
+  const [recentQueries, setRecentQueries] = useState<string[]>(() => {
+    try {
+      return JSON.parse(window.localStorage.getItem(PORT_HISTORY_KEY) || "[]");
+    } catch {
+      return [];
+    }
+  });
   const [processes, setProcesses] = useState<PortProcess[]>([]);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [loading, setLoading] = useState(false);
@@ -344,22 +384,34 @@ function PortsTool({ onStatus }: { onStatus: (value: string) => void }) {
   const ports = useMemo(() => parsePorts(portInput), [portInput]);
   const selectedProcesses = processes.filter((item) => selected.has(item.pid));
 
+  useEffect(() => {
+    window.localStorage.setItem(PORT_INPUT_KEY, portInput);
+  }, [portInput]);
+
   async function runInspect() {
     if (!ports.length) {
-      setError("请输入有效端口，范围为 1-65535。");
+      setError(t("ports.invalid"));
       return;
+    }
+    const normalizedQuery = portInput.trim();
+    if (normalizedQuery) {
+      setRecentQueries((current) => {
+        const next = [normalizedQuery, ...current.filter((item) => item !== normalizedQuery)].slice(0, 6);
+        window.localStorage.setItem(PORT_HISTORY_KEY, JSON.stringify(next));
+        return next;
+      });
     }
     setLoading(true);
     setError("");
-    onStatus("正在扫描端口");
+    onStatus(t("ports.scanning"));
     try {
       const result = await inspectPorts(ports);
       setProcesses(result);
       setSelected(new Set());
-      onStatus(`已查询 ${ports.length} 个端口`);
+      onStatus(t("ports.queried", { count: ports.length }));
     } catch (reason) {
       setError(String(reason));
-      onStatus("端口扫描失败");
+      onStatus(t("ports.scanFailed"));
     } finally {
       setLoading(false);
     }
@@ -369,7 +421,7 @@ function PortsTool({ onStatus }: { onStatus: (value: string) => void }) {
     const pids = [...selected];
     setConfirmOpen(false);
     setLoading(true);
-    onStatus(`正在结束 ${pids.length} 个进程`);
+    onStatus(t("ports.killing", { count: pids.length }));
     try {
       const results = await killProcesses(pids);
       const succeeded = new Set(results.filter((item) => item.success).map((item) => item.pid));
@@ -379,10 +431,10 @@ function PortsTool({ onStatus }: { onStatus: (value: string) => void }) {
       const failed = results.filter((item) => !item.success);
       setError(failed.map((item) => `PID ${item.pid}: ${item.message}`).join("\n"));
       setSelected(new Set());
-      onStatus(`已结束 ${succeeded.size} 个进程`);
+      onStatus(t("ports.killed", { count: succeeded.size }));
     } catch (reason) {
       setError(String(reason));
-      onStatus("结束进程失败");
+      onStatus(t("ports.killFailed"));
     } finally {
       setLoading(false);
     }
@@ -401,10 +453,10 @@ function PortsTool({ onStatus }: { onStatus: (value: string) => void }) {
     <section className="tool-page">
       <ToolHeader
         icon={Network}
-        title="端口进程"
-        description="定位占用本机端口的进程，并安全地批量结束。"
+        title={t("ports.title")}
+        description={t("ports.description")}
         action={
-          <button className="icon-button" title="重新扫描" onClick={runInspect} disabled={loading}>
+          <button className="icon-button" title={t("ports.refresh")} onClick={runInspect} disabled={loading}>
             <RefreshCw size={17} />
           </button>
         }
@@ -418,26 +470,35 @@ function PortsTool({ onStatus }: { onStatus: (value: string) => void }) {
             onChange={(event) => setPortInput(event.target.value)}
             onKeyDown={(event) => event.key === "Enter" && runInspect()}
             placeholder="3000, 5173, 8000-8010"
-            aria-label="端口"
+            aria-label={t("ports.port")}
           />
-          <span>{ports.length} 个端口</span>
+          <span>{t("ports.count", { count: ports.length })}</span>
         </div>
         <button className="primary-button" onClick={runInspect} disabled={loading}>
           {loading ? <LoaderCircle className="spin" size={17} /> : <Search size={17} />}
-          查询
+          {t("ports.search")}
         </button>
       </div>
 
       <div className="tip-line">
         <Sparkles size={15} />
-        支持逗号、空格和范围输入，单次最多查询 200 个端口。
+        {t("ports.tip")}
       </div>
+      {recentQueries.length > 0 && (
+        <div className="quick-values port-query-history" aria-label={t("ports.recent")}>
+          {recentQueries.map((query) => (
+            <button key={query} onClick={() => setPortInput(query)}>
+              {query}
+            </button>
+          ))}
+        </div>
+      )}
 
       {error && (
         <div className="error-banner">
           <ShieldAlert size={17} />
           <span>{error}</span>
-          <button className="icon-button small" onClick={() => setError("")} title="关闭">
+          <button className="icon-button small" onClick={() => setError("")} title={t("common.close")}>
             <X size={15} />
           </button>
         </div>
@@ -446,8 +507,12 @@ function PortsTool({ onStatus }: { onStatus: (value: string) => void }) {
       <div className="table-shell">
         <div className="table-toolbar">
           <div>
-            <strong>{processes.length ? `${processes.length} 个占用记录` : "查询结果"}</strong>
-            <span>{processes.length ? `覆盖 ${new Set(processes.map((item) => item.port)).size} 个端口` : "尚未查询"}</span>
+            <strong>{processes.length ? t("ports.records", { count: processes.length }) : t("ports.results")}</strong>
+            <span>
+              {processes.length
+                ? t("ports.coverage", { count: new Set(processes.map((item) => item.port)).size })
+                : t("ports.notQueried")}
+            </span>
           </div>
           <button
             className="danger-button"
@@ -455,7 +520,7 @@ function PortsTool({ onStatus }: { onStatus: (value: string) => void }) {
             onClick={() => setConfirmOpen(true)}
           >
             <Trash2 size={16} />
-            结束所选 {selected.size ? `(${selected.size})` : ""}
+            {t("ports.killSelected")} {selected.size ? `(${selected.size})` : ""}
           </button>
         </div>
 
@@ -463,11 +528,11 @@ function PortsTool({ onStatus }: { onStatus: (value: string) => void }) {
           <div className="process-table">
             <div className="process-row process-head">
               <span />
-              <span>端口</span>
-              <span>进程</span>
+              <span>{t("ports.port")}</span>
+              <span>{t("ports.process")}</span>
               <span>PID</span>
-              <span>状态</span>
-              <span>内存</span>
+              <span>{t("ports.state")}</span>
+              <span>{t("ports.memory")}</span>
             </div>
             {processes.map((process) => (
               <label className="process-row" key={`${process.port}-${process.protocol}-${process.pid}`}>
@@ -488,7 +553,7 @@ function PortsTool({ onStatus }: { onStatus: (value: string) => void }) {
                     <TerminalSquare size={17} />
                   </span>
                   <span>
-                    <strong>{process.processName || "未知进程"}</strong>
+                    <strong>{process.processName || t("ports.unknown")}</strong>
                     <small title={process.command}>{process.command || process.executable || "-"}</small>
                   </span>
                 </span>
@@ -507,8 +572,8 @@ function PortsTool({ onStatus }: { onStatus: (value: string) => void }) {
             <span className="empty-visual">
               <Network size={30} />
             </span>
-            <strong>输入端口开始查询</strong>
-            <p>在浏览器预览中，3000 和 5173 会返回演示数据。</p>
+            <strong>{t("ports.emptyTitle")}</strong>
+            <p>{t("ports.emptyText")}</p>
           </div>
         )}
       </div>
@@ -519,10 +584,8 @@ function PortsTool({ onStatus }: { onStatus: (value: string) => void }) {
             <span className="modal-icon danger">
               <ShieldAlert size={22} />
             </span>
-            <h2>结束所选进程？</h2>
-            <p>
-              将向 {selectedProcesses.length} 个进程发送强制结束信号。未保存的数据可能丢失，此操作无法撤销。
-            </p>
+            <h2>{t("ports.confirmTitle")}</h2>
+            <p>{t("ports.confirmText", { count: selectedProcesses.length })}</p>
             <div className="pid-list">
               {selectedProcesses.map((item) => (
                 <span key={item.pid}>
@@ -532,11 +595,11 @@ function PortsTool({ onStatus }: { onStatus: (value: string) => void }) {
             </div>
             <div className="modal-actions">
               <button className="secondary-button" onClick={() => setConfirmOpen(false)}>
-                取消
+                {t("common.cancel")}
               </button>
               <button className="danger-button solid" onClick={runKill}>
                 <Trash2 size={16} />
-                确认结束
+                {t("ports.confirmKill")}
               </button>
             </div>
           </div>
@@ -547,12 +610,15 @@ function PortsTool({ onStatus }: { onStatus: (value: string) => void }) {
 }
 
 function ColorTool({
+  language,
   shortcutTrigger,
   onStatus,
 }: {
+  language: AppLanguage;
   shortcutTrigger: number;
   onStatus: (value: string) => void;
 }) {
+  const t = createTranslator(language);
   const [sample, setSample] = useState<ColorSample>({
     hex: "#4ADE80",
     rgb: [74, 222, 128],
@@ -568,16 +634,16 @@ function ColorTool({
     if (picking) return;
     setPicking(true);
     setError("");
-    onStatus("点击屏幕任意位置取色");
+    onStatus(t("color.picking"));
     try {
       const next = await pickScreenColor();
       setSample(next);
       setHistory((current) => [next, ...current.filter((item) => item.hex !== next.hex)].slice(0, 12));
-      onStatus(`已取得并复制颜色 ${next.hex}`);
+      onStatus(t("color.picked", { value: next.hex }));
     } catch (reason) {
       const message = String(reason);
       if (!message.toLowerCase().includes("cancel")) setError(message);
-      onStatus("取色已取消");
+      onStatus(t("color.cancelled"));
     } finally {
       setPicking(false);
     }
@@ -593,7 +659,7 @@ function ColorTool({
 
   return (
     <section className="tool-page">
-      <ToolHeader icon={Crosshair} title="取色器" description="从屏幕任意位置读取精确颜色值。" />
+      <ToolHeader icon={Crosshair} title={t("color.title")} description={t("color.description")} />
 
       <div className="color-layout">
         <div className="color-stage" style={{ backgroundColor: sample.hex }}>
@@ -608,7 +674,7 @@ function ColorTool({
         </div>
 
         <div className="control-panel">
-          <span className="panel-label">当前颜色</span>
+          <span className="panel-label">{t("color.current")}</span>
           <div className="color-value-row">
             <span className="color-swatch" style={{ backgroundColor: sample.hex }} />
             <div>
@@ -621,7 +687,7 @@ function ColorTool({
 
           <button className="primary-button wide" onClick={pick} disabled={picking}>
             {picking ? <LoaderCircle className="spin" size={18} /> : <Crosshair size={18} />}
-            {picking ? "等待取色…" : "从屏幕取色"}
+            {picking ? t("color.waiting") : t("color.pick")}
           </button>
 
           <div className="copy-grid">
@@ -639,12 +705,12 @@ function ColorTool({
       <div className="history-section">
         <div className="section-title">
           <div>
-            <strong>最近颜色</strong>
-            <span>点击色块即可复制 HEX</span>
+            <strong>{t("color.recent")}</strong>
+            <span>{t("color.recentHint")}</span>
           </div>
           {history.length > 0 && (
             <button className="text-button" onClick={() => setHistory([])}>
-              清空
+              {t("common.clear")}
             </button>
           )}
         </div>
@@ -666,7 +732,14 @@ function ColorTool({
   );
 }
 
-function StringTool({ onStatus }: { onStatus: (value: string) => void }) {
+function StringTool({
+  language,
+  onStatus,
+}: {
+  language: AppLanguage;
+  onStatus: (value: string) => void;
+}) {
+  const t = createTranslator(language);
   const [mode, setMode] = useState<StringMode>("alphanumeric");
   const [length, setLength] = useState(32);
   const [count, setCount] = useState(5);
@@ -679,7 +752,7 @@ function StringTool({ onStatus }: { onStatus: (value: string) => void }) {
   function generate() {
     const next = generateStrings(mode, mode === "uuid" ? 36 : length, count, includeSymbols);
     setResults(next);
-    onStatus(`已生成 ${count} 条随机字符串`);
+    onStatus(t("strings.generated", { count }));
   }
 
   useEffect(() => {
@@ -689,9 +762,9 @@ function StringTool({ onStatus }: { onStatus: (value: string) => void }) {
   }, [mode]);
 
   const modes: Array<{ id: StringMode; label: string; icon: typeof Hash }> = [
-    { id: "alphanumeric", label: "字母 + 数字", icon: KeyRound },
-    { id: "letters", label: "仅字母", icon: Hash },
-    { id: "numbers", label: "仅数字", icon: Dices },
+    { id: "alphanumeric", label: t("strings.alphanumeric"), icon: KeyRound },
+    { id: "letters", label: t("strings.letters"), icon: Hash },
+    { id: "numbers", label: t("strings.numbers"), icon: Dices },
     { id: "hex", label: "HEX", icon: Palette },
     { id: "uuid", label: "UUID v4", icon: Sparkles },
   ];
@@ -700,12 +773,12 @@ function StringTool({ onStatus }: { onStatus: (value: string) => void }) {
     <section className="tool-page">
       <ToolHeader
         icon={WandSparkles}
-        title="字符串生成"
-        description="使用系统加密随机源，批量生成开发测试数据。"
+        title={t("strings.title")}
+        description={t("strings.description")}
         action={
           <button className="primary-button" onClick={generate}>
             <RefreshCw size={16} />
-            重新生成
+            {t("strings.regenerate")}
           </button>
         }
       />
@@ -713,7 +786,7 @@ function StringTool({ onStatus }: { onStatus: (value: string) => void }) {
       <div className="generator-layout">
         <div className="generator-settings">
           <div>
-            <span className="panel-label">类型</span>
+            <span className="panel-label">{t("strings.type")}</span>
             <div className="mode-grid">
               {modes.map((item) => {
                 const Icon = item.icon;
@@ -733,7 +806,7 @@ function StringTool({ onStatus }: { onStatus: (value: string) => void }) {
 
           <div className={mode === "uuid" ? "range-setting disabled" : "range-setting"}>
             <div>
-              <span className="panel-label">长度</span>
+              <span className="panel-label">{t("strings.length")}</span>
               <output>{mode === "uuid" ? 36 : length}</output>
             </div>
             <input
@@ -761,7 +834,7 @@ function StringTool({ onStatus }: { onStatus: (value: string) => void }) {
 
           <div className="count-row">
             <label>
-              <span className="panel-label">生成数量</span>
+              <span className="panel-label">{t("strings.count")}</span>
               <span className="stepper">
                 <button onClick={() => setCount((value) => Math.max(1, value - 1))}>−</button>
                 <input
@@ -778,8 +851,8 @@ function StringTool({ onStatus }: { onStatus: (value: string) => void }) {
             </label>
             <label className={mode === "uuid" ? "toggle-row disabled" : "toggle-row"}>
               <span>
-                <strong>包含符号</strong>
-                <small>! @ # $ % 等</small>
+                <strong>{t("strings.symbols")}</strong>
+                <small>{t("strings.symbolsHint")}</small>
               </span>
               <button
                 className={includeSymbols ? "toggle active" : "toggle"}
@@ -795,22 +868,22 @@ function StringTool({ onStatus }: { onStatus: (value: string) => void }) {
 
           <button className="primary-button wide" onClick={generate}>
             <WandSparkles size={17} />
-            生成字符串
+            {t("strings.generate")}
           </button>
         </div>
 
         <div className="result-panel">
           <div className="section-title">
             <div>
-              <strong>生成结果</strong>
-              <span>{results.length} 条</span>
+              <strong>{t("strings.results")}</strong>
+              <span>{t("strings.items", { count: results.length })}</span>
             </div>
             <button
               className="secondary-button compact"
               onClick={() => copyText(results.join("\n"), setCopied)}
             >
               {copied === results.join("\n") ? <Check size={15} /> : <Clipboard size={15} />}
-              复制全部
+              {t("strings.copyAll")}
             </button>
           </div>
           <div className="string-list">
@@ -818,7 +891,7 @@ function StringTool({ onStatus }: { onStatus: (value: string) => void }) {
               <div className="string-row" key={`${result}-${index}`}>
                 <span>{String(index + 1).padStart(2, "0")}</span>
                 <code>{result}</code>
-                <button title="复制" onClick={() => copyText(result, setCopied)}>
+                <button title={t("common.copy")} onClick={() => copyText(result, setCopied)}>
                   {copied === result ? <Check size={15} /> : <Copy size={15} />}
                 </button>
               </div>

@@ -5,6 +5,7 @@ import type {
   CaptureRegion,
   RegionSelectorOverlayData,
 } from "../types";
+import { createTranslator, storedLanguage } from "../i18n";
 
 interface Point {
   x: number;
@@ -17,6 +18,7 @@ interface Selection {
 }
 
 export function RegionSelectorOverlay({ monitorId }: { monitorId: number }) {
+  const t = createTranslator(storedLanguage());
   const [overlay, setOverlay] = useState<RegionSelectorOverlayData | null>(null);
   const [selection, setSelection] = useState<Selection | null>(null);
   const [dragging, setDragging] = useState(false);
@@ -180,8 +182,8 @@ export function RegionSelectorOverlay({ monitorId }: { monitorId: number }) {
 
       {(!selection || !valid) && (
         <div className="region-selector-instruction">
-          {selection ? "区域太小，请重新拖拽" : "按住鼠标拖拽选择区域"}
-          <small>右键或 Esc 取消</small>
+          {selection ? t("overlay.tooSmall") : t("overlay.drag")}
+          <small>{t("overlay.cancelHint")}</small>
         </div>
       )}
 
@@ -199,15 +201,15 @@ export function RegionSelectorOverlay({ monitorId }: { monitorId: number }) {
               style={{ transform: `translate(${actionLeft}px, ${actionTop}px)` }}
               onPointerDown={(event) => event.stopPropagation()}
             >
-              <button title="重新选择" onClick={() => setSelection(null)}>
+              <button title={t("overlay.retry")} onClick={() => setSelection(null)}>
                 <RotateCcw size={16} />
               </button>
-              <button title="取消" onClick={cancel}>
+              <button title={t("common.cancel")} onClick={cancel}>
                 <X size={16} />
               </button>
               <button className="confirm" onClick={confirm}>
                 <Check size={16} />
-                确认
+                {t("common.confirm")}
               </button>
             </div>
           )}

@@ -1102,6 +1102,24 @@ button:disabled {
   color: var(--green);
 }
 
+.port-query-history {
+  display: flex;
+  max-width: 100%;
+  margin-top: 8px;
+  padding-bottom: 3px;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.port-query-history button {
+  min-width: 62px;
+  flex: 0 0 auto;
+  padding: 0 9px;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 9px;
+  white-space: nowrap;
+}
+
 .disabled {
   opacity: 0.46;
 }
@@ -1618,6 +1636,25 @@ button:disabled {
   gap: 10px;
 }
 
+.audio-recording-control {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface-2);
+}
+
+.audio-recording-control .toggle-row {
+  align-items: center;
+  padding-bottom: 0;
+}
+
+.audio-recording-control > label {
+  display: grid;
+  gap: 7px;
+}
+
 .compact-select {
   min-height: 36px;
 }
@@ -1784,6 +1821,42 @@ button:disabled {
 
 .recording-history-item > span:last-child small {
   font-size: 8px;
+}
+
+.recording-context-menu {
+  position: fixed;
+  z-index: 40;
+  display: grid;
+  width: 178px;
+  padding: 5px;
+  border: 1px solid #3b414b;
+  border-radius: 7px;
+  background: #191c21;
+  box-shadow: 0 16px 42px rgba(0, 0, 0, 0.38);
+}
+
+.recording-context-menu button {
+  display: grid;
+  min-height: 34px;
+  grid-template-columns: 22px minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 10px;
+  text-align: left;
+}
+
+.recording-context-menu button:hover {
+  background: var(--surface-2);
+}
+
+.recording-context-menu svg {
+  color: var(--muted);
 }
 
 .settings-page {
@@ -2079,6 +2152,12 @@ button:disabled {
   border-color: var(--line);
   background: #ffffff;
   box-shadow: 0 24px 70px rgba(31, 39, 47, 0.22);
+}
+
+:root[data-theme="light"] .recording-context-menu {
+  border-color: var(--line);
+  background: #ffffff;
+  box-shadow: 0 16px 42px rgba(31, 39, 47, 0.2);
 }
 
 :root[data-theme="light"] .saved-path,

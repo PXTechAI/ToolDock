@@ -4,12 +4,19 @@ import {
   FolderOpen,
   Image,
   KeyRound,
+  Languages,
   LoaderCircle,
   PanelTopClose,
   RotateCcw,
   Settings,
+  Type,
   Video,
 } from "lucide-react";
+import {
+  createTranslator,
+  fontOptions,
+  languageOptions,
+} from "../i18n";
 import { chooseDirectory } from "../lib/native";
 import type { AppSettings } from "../types";
 import { ToolHeader } from "./ToolHeader";
@@ -27,6 +34,7 @@ export function SettingsTool({
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState("");
+  const t = createTranslator(draft.language);
 
   useEffect(() => setDraft(settings), [settings]);
 
@@ -45,18 +53,18 @@ export function SettingsTool({
       draft.recordingShortcut,
     ];
     if (new Set(shortcuts).size !== shortcuts.length) {
-      setError("取色、截图和录屏不能使用相同的快捷键");
+      setError(t("settings.duplicateShortcut"));
       setSaving(false);
       return;
     }
     try {
       await onSave(draft);
       setSaved(true);
-      onStatus("设置已保存");
+      onStatus(t("settings.savedStatus"));
       window.setTimeout(() => setSaved(false), 1600);
     } catch (reason) {
       setError(String(reason));
-      onStatus("设置保存失败");
+      onStatus(t("settings.saveFailed"));
     } finally {
       setSaving(false);
     }
@@ -64,7 +72,88 @@ export function SettingsTool({
 
   return (
     <section className="tool-page settings-page">
-      <ToolHeader icon={Settings} title="设置" description="管理全局快捷键、窗口行为和媒体文件保存位置。" />
+      <ToolHeader
+        icon={Settings}
+        title={t("settings.title")}
+        description={t("settings.description")}
+      />
+
+      <div className="settings-section">
+        <div className="settings-section-heading">
+          <span className="heading-icon">
+            <Languages size={18} />
+          </span>
+          <div>
+            <strong>{t("settings.appearance")}</strong>
+            <small>{t("settings.appearanceHint")}</small>
+          </div>
+        </div>
+
+        <div className="setting-row appearance-setting">
+          <span>
+            <strong>{t("settings.language")}</strong>
+            <small>{t("settings.languageHint")}</small>
+          </span>
+          <select
+            value={draft.language}
+            onChange={(event) =>
+              setDraft((current) => ({
+                ...current,
+                language: event.target.value as AppSettings["language"],
+              }))
+            }
+          >
+            {languageOptions.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="setting-row appearance-setting">
+          <span>
+            <strong>{t("settings.font")}</strong>
+            <small>{t("settings.fontHint")}</small>
+          </span>
+          <span className="appearance-select">
+            <Type size={15} />
+            <select
+              value={draft.uiFont}
+              onChange={(event) =>
+                setDraft((current) => ({
+                  ...current,
+                  uiFont: event.target.value as AppSettings["uiFont"],
+                }))
+              }
+            >
+              {fontOptions.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {t(option.key)}
+                </option>
+              ))}
+            </select>
+          </span>
+        </div>
+
+        <div className="setting-row appearance-setting">
+          <span>
+            <strong>{t("settings.fontSize")}</strong>
+            <small>{t("settings.fontSizeHint")}</small>
+          </span>
+          <div className="segmented font-scale-control">
+            {[1, 1.1, 1.2].map((scale) => (
+              <button
+                className={draft.fontScale === scale ? "active" : ""}
+                key={scale}
+                onClick={() => setDraft((current) => ({ ...current, fontScale: scale }))}
+              >
+                {Math.round(scale * 100)}%
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
 
       <div className="settings-section">
         <div className="settings-section-heading">
@@ -72,31 +161,34 @@ export function SettingsTool({
             <KeyRound size={18} />
           </span>
           <div>
-            <strong>快捷键与窗口</strong>
-            <small>全局快捷键在程序最小化或隐藏后仍然可用</small>
+            <strong>{t("settings.shortcuts")}</strong>
+            <small>{t("settings.shortcutsHint")}</small>
           </div>
         </div>
 
         <ShortcutSetting
-          label="屏幕取色"
-          detail="点击右侧后直接按下新的组合键"
+          label={t("settings.colorShortcut")}
+          detail={t("settings.colorShortcutHint")}
           value={draft.colorShortcut}
           defaultValue="CommandOrControl+Alt+C"
           onChange={(value) => setDraft((current) => ({ ...current, colorShortcut: value }))}
+          t={t}
         />
         <ShortcutSetting
-          label="区域截图"
-          detail="快捷键会直接打开桌面区域框选"
+          label={t("settings.screenshotShortcut")}
+          detail={t("settings.screenshotShortcutHint")}
           value={draft.screenshotShortcut}
           defaultValue="CommandOrControl+Alt+S"
           onChange={(value) => setDraft((current) => ({ ...current, screenshotShortcut: value }))}
+          t={t}
         />
         <ShortcutSetting
-          label="开始或停止录屏"
-          detail="打开录屏工具，并使用当前配置开始录制或停止保存"
+          label={t("settings.recordingShortcut")}
+          detail={t("settings.recordingShortcutHint")}
           value={draft.recordingShortcut}
           defaultValue="CommandOrControl+Alt+R"
           onChange={(value) => setDraft((current) => ({ ...current, recordingShortcut: value }))}
+          t={t}
         />
         <div className="setting-row">
           <span className="setting-with-icon">
@@ -104,8 +196,8 @@ export function SettingsTool({
               <PanelTopClose size={18} />
             </span>
             <span>
-              <strong>关闭时隐藏到系统托盘</strong>
-              <small>关闭主窗口后仍可通过托盘或快捷键恢复</small>
+              <strong>{t("settings.closeToTray")}</strong>
+              <small>{t("settings.closeToTrayHint")}</small>
             </span>
           </span>
           <button
@@ -113,7 +205,7 @@ export function SettingsTool({
             onClick={() => setDraft((current) => ({ ...current, closeToTray: !current.closeToTray }))}
             role="switch"
             aria-checked={draft.closeToTray}
-            title={draft.closeToTray ? "关闭后隐藏到托盘" : "关闭后退出程序"}
+            title={t("settings.closeToTray")}
           >
             <span />
           </button>
@@ -126,26 +218,28 @@ export function SettingsTool({
             <FolderOpen size={18} />
           </span>
           <div>
-            <strong>文件与目录</strong>
-            <small>保存时会自动创建不存在的目录</small>
+            <strong>{t("settings.files")}</strong>
+            <small>{t("settings.filesHint")}</small>
           </div>
         </div>
 
         <FolderSetting
           icon={Image}
-          label="截图保存文件夹"
-          detail="PNG 截图与截图历史从此目录读取"
+          label={t("settings.screenshotDir")}
+          detail={t("settings.screenshotDirHint")}
           value={draft.screenshotDir}
           onChange={(value) => setDraft((current) => ({ ...current, screenshotDir: value }))}
           onBrowse={() => browse("screenshotDir")}
+          browseLabel={t("common.browse")}
         />
         <FolderSetting
           icon={Video}
-          label="录屏保存文件夹"
-          detail="H.264 MP4 视频会保存在此目录"
+          label={t("settings.recordingDir")}
+          detail={t("settings.recordingDirHint")}
           value={draft.recordingDir}
           onChange={(value) => setDraft((current) => ({ ...current, recordingDir: value }))}
           onBrowse={() => browse("recordingDir")}
+          browseLabel={t("common.browse")}
         />
       </div>
 
@@ -153,7 +247,7 @@ export function SettingsTool({
         {error && <p className="inline-error">{error}</p>}
         <button className="primary-button" onClick={save} disabled={saving}>
           {saving ? <LoaderCircle className="spin" size={16} /> : saved ? <Check size={16} /> : <Settings size={16} />}
-          {saving ? "正在保存…" : saved ? "已保存" : "保存设置"}
+          {saving ? t("common.saving") : saved ? t("common.saved") : t("settings.save")}
         </button>
       </div>
     </section>
@@ -166,12 +260,14 @@ function ShortcutSetting({
   value,
   defaultValue,
   onChange,
+  t,
 }: {
   label: string;
   detail: string;
   value: string;
   defaultValue: string;
   onChange: (value: string) => void;
+  t: (key: string) => string;
 }) {
   const [recording, setRecording] = useState(false);
   const [hint, setHint] = useState("");
@@ -194,7 +290,7 @@ function ShortcutSetting({
     if (event.altKey) modifiers.push("Alt");
     if (event.shiftKey) modifiers.push("Shift");
     if (!key || !modifiers.some((item) => item === "CommandOrControl" || item === "Alt")) {
-      setHint("请包含 Ctrl/Cmd 或 Alt，并按下字母、数字或功能键");
+      setHint(t("settings.shortcutInvalid"));
       return;
     }
 
@@ -215,16 +311,16 @@ function ShortcutSetting({
           className={recording ? "shortcut-recorder recording" : "shortcut-recorder"}
           onClick={() => {
             setRecording(true);
-            setHint("请按下新的组合键，Esc 取消");
+            setHint(t("settings.shortcutPrompt"));
           }}
           onKeyDown={record}
         >
           <KeyRound size={15} />
-          <kbd>{recording ? "等待按键…" : displayShortcut(value)}</kbd>
+          <kbd>{recording ? t("settings.waitingKey") : displayShortcut(value)}</kbd>
         </button>
         <button
           className="icon-button"
-          title="恢复默认快捷键"
+          title={t("settings.restoreShortcut")}
           onClick={() => {
             onChange(defaultValue);
             setRecording(false);
@@ -259,6 +355,7 @@ function FolderSetting({
   value,
   onChange,
   onBrowse,
+  browseLabel,
 }: {
   icon: typeof Image;
   label: string;
@@ -266,6 +363,7 @@ function FolderSetting({
   value: string;
   onChange: (value: string) => void;
   onBrowse: () => void;
+  browseLabel: string;
 }) {
   return (
     <div className="folder-setting">
@@ -279,7 +377,7 @@ function FolderSetting({
       <input value={value} onChange={(event) => onChange(event.target.value)} />
       <button className="secondary-button" onClick={onBrowse}>
         <FolderOpen size={15} />
-        浏览
+        {browseLabel}
       </button>
     </div>
   );
