@@ -61,6 +61,7 @@ jobs:
             libclang-dev \
             libdbus-1-dev \
             libegl-dev \
+            libgbm-dev \
             libpipewire-0.3-dev \
             librsvg2-dev \
             libssl-dev \
@@ -200,7 +201,7 @@ jobs:
           prerelease: false
           uploadUpdaterJson: false
           retryAttempts: 2
-          releaseAssetNamePattern: ToolDock_[version]_[platform]_[arch][setup].[ext]
+          releaseAssetNamePattern: ToolDock_[version]_[platform]_[arch][setup][ext]
           args: ${{ matrix.args }}
 
       - name: Verify macOS signature and notarization
