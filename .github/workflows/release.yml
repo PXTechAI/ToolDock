@@ -98,6 +98,11 @@ jobs:
         env:
           RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
 
+      - name: Prepare FFmpeg sidecar
+        run: npm run prepare:ffmpeg
+        env:
+          TOOLDOCK_TARGET_TRIPLE: ${{ matrix.target }}
+
       - name: Validate Apple signing configuration
         if: runner.os == 'macOS'
         shell: bash
