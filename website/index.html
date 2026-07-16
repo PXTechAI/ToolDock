@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="ToolDock is a cross-platform desktop toolbox for developers."
+    />
+    <meta name="theme-color" content="#101318" />
+    <title>ToolDock | Developer Toolbox</title>
+    <link rel="icon" href="assets/tooldock.svg" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="site-header">
+      <a class="brand" href="#top" aria-label="ToolDock home">
+        <img src="assets/tooldock.svg" alt="" width="36" height="36" />
+        <span>ToolDock</span>
+      </a>
+      <nav class="header-actions" aria-label="Primary navigation">
+        <div class="language-switcher" role="group" aria-label="Language">
+          <button type="button" data-language="zh-CN">中</button>
+          <button type="button" data-language="en">EN</button>
+          <button type="button" data-language="ja">日</button>
+          <button type="button" data-language="ko">한</button>
+        </div>
+        <a class="header-link repository-link" href="#" data-i18n="navGithub">GitHub</a>
+      </nav>
+    </header>
+
+    <main id="top">
+      <section class="hero" aria-labelledby="hero-title">
+        <div class="hero-image" aria-hidden="true"></div>
+        <div class="hero-scrim" aria-hidden="true"></div>
+        <div class="hero-content">
+          <p class="eyebrow" data-i18n="eyebrow">Developer desktop toolbox</p>
+          <h1 id="hero-title">ToolDock</h1>
+          <p class="hero-copy" data-i18n="heroCopy">
+            Pick colors, inspect ports, capture screenshots, record your screen,
+            and generate secure strings without leaving your desktop.
+          </p>
+          <div class="hero-actions">
+            <a class="button button-primary releases-link" href="#" data-i18n="download">
+              Download latest release
+            </a>
+            <a class="button button-secondary repository-link" href="#" data-i18n="source">
+              View source
+            </a>
+          </div>
+          <p class="platforms" data-i18n="platforms">Windows · macOS · Linux</p>
+        </div>
+      </section>
+
+      <section class="feature-band" aria-labelledby="features-title">
+        <div class="section-inner">
+          <div class="section-heading">
+            <p class="eyebrow" data-i18n="featuresEyebrow">One dock, daily tools</p>
+            <h2 id="features-title" data-i18n="featuresTitle">
+              Built for the small jobs that interrupt real work
+            </h2>
+          </div>
+          <div class="feature-grid">
+            <article class="feature-card">
+              <span class="feature-index">01</span>
+              <h3 data-i18n="colorTitle">Screen color picker</h3>
+              <p data-i18n="colorCopy">
+                A cross-display overlay, magnifier, and instant HEX/RGB clipboard output.
+              </p>
+            </article>
+            <article class="feature-card">
+              <span class="feature-index">02</span>
+              <h3 data-i18n="portTitle">Port process manager</h3>
+              <p data-i18n="portCopy">
+                Find the process behind a local port and safely terminate selected entries.
+              </p>
+            </article>
+            <article class="feature-card">
+              <span class="feature-index">03</span>
+              <h3 data-i18n="captureTitle">Screenshots and recording</h3>
+              <p data-i18n="captureCopy">
+                Capture full displays, selected regions, or application windows with history.
+              </p>
+            </article>
+            <article class="feature-card">
+              <span class="feature-index">04</span>
+              <h3 data-i18n="stringTitle">Secure string generator</h3>
+              <p data-i18n="stringCopy">
+                Generate UUIDs, HEX values, passwords, and custom-length random strings.
+              </p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="showcase" aria-labelledby="showcase-title">
+        <div class="section-inner">
+          <div class="section-heading">
+            <p class="eyebrow" data-i18n="showcaseEyebrow">Native desktop workflow</p>
+            <h2 id="showcase-title" data-i18n="showcaseTitle">
+              A focused interface in light or dark mode
+            </h2>
+          </div>
+          <figure class="primary-shot">
+            <img
+              src="assets/color-picker-light.png"
+              alt="ToolDock color picker in light mode"
+              data-i18n-alt="colorAlt"
+              loading="lazy"
+            />
+          </figure>
+          <div class="secondary-shots">
+            <figure>
+              <img
+                src="assets/ports-light.png"
+                alt="ToolDock port process manager"
+                data-i18n-alt="portAlt"
+                loading="lazy"
+              />
+            </figure>
+            <figure>
+              <img
+                src="assets/recording-dark.png"
+                alt="ToolDock screen recorder in dark mode"
+                data-i18n-alt="recordingAlt"
+                loading="lazy"
+              />
+            </figure>
+          </div>
+        </div>
+      </section>
+
+      <section class="open-source-band" aria-labelledby="open-source-title">
+        <div class="section-inner open-source-layout">
+          <div>
+            <p class="eyebrow" data-i18n="openEyebrow">Open source and local first</p>
+            <h2 id="open-source-title" data-i18n="openTitle">
+              Your captures and process data stay on your machine
+            </h2>
+            <p data-i18n="openCopy">
+              ToolDock is released under the MIT License. Build it yourself, inspect the
+              source, and adapt it to your workflow.
+            </p>
+          </div>
+          <div class="open-source-actions">
+            <a class="button button-primary repository-link" href="#" data-i18n="browse">
+              Browse repository
+            </a>
+            <a
+              class="button button-outline"
+              href="https://tools.routemarket.ai/?utm_source=tooldock&utm_medium=github_pages&utm_campaign=project_site&utm_content=tools_cta"
+              rel="noopener noreferrer"
+              data-i18n="moreTools"
+            >
+              Explore RouteMarket Tools
+            </a>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <div class="footer-inner">
+        <div class="footer-brand">
+          <img src="assets/tooldock.svg" alt="" width="28" height="28" />
+          <span>ToolDock</span>
+        </div>
+        <p>
+          <span data-i18n="footer">Built by PX Labs. Released under the MIT License.</span>
+          <span aria-hidden="true"> · </span>
+          <a
+            href="https://routemarket.ai/?utm_source=tooldock&utm_medium=github_pages&utm_campaign=project_site&utm_content=footer"
+            rel="noopener noreferrer"
+          >
+            RouteMarket.ai
+          </a>
+        </p>
+      </div>
+    </footer>
+
+    <script src="app.js"></script>
+  </body>
+</html>

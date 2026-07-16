@@ -147,6 +147,7 @@ npm run desktop:build
 
 - `.github/workflows/ci.yml` はバージョン確認、フロントエンドビルド、Rust フォーマット確認、Windows/macOS/Linux のネイティブチェックを実行します。
 - `.github/workflows/release.yml` は Windows NSIS、macOS DMG、Linux AppImage、Linux DEB をビルドします。
+- `.github/workflows/pages.yml` は `website/` の多言語プロジェクトサイトを GitHub Pages に公開します。
 - `v0.2.0` のようなタグを push すると Draft GitHub Release が作成されます。成果物を確認してから手動で公開してください。
 
 リリース前に `package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml` のバージョンを一致させ、`CHANGELOG.md` を更新してください。
@@ -162,6 +163,7 @@ npm run desktop:build
 |-- scripts/             # リポジトリ管理スクリプト
 |-- src/                 # React UI
 |-- src-tauri/           # Rust ネイティブ層と Tauri 設定
+|-- website/             # 多言語 GitHub Pages サイト
 |-- README.md            # 英語ドキュメント
 `-- README.zh-CN.md      # 中国語ドキュメント
 ```
@@ -170,4 +172,4 @@ npm run desktop:build
 
 Pull Request を作成する前に [CONTRIBUTING.md](CONTRIBUTING.md) を確認してください。セキュリティ問題は [SECURITY.md](SECURITY.md) に従って非公開で報告してください。
 
-現在、オープンソースライセンスは選択されていません。公開配布前にライセンスを決定して追加してください。
+ToolDock は [MIT License](LICENSE) で公開されています。
