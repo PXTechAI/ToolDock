@@ -1,0 +1,117 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to build, for example v0.1.0
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.platform }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x64
+            platform: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            args: --target x86_64-unknown-linux-gnu --bundles appimage,deb
+          - name: Windows x64
+            platform: windows-latest
+            target: x86_64-pc-windows-msvc
+            args: --target x86_64-pc-windows-msvc --bundles nsis
+          - name: macOS Apple Silicon
+            platform: macos-latest
+            target: aarch64-apple-darwin
+            args: --target aarch64-apple-darwin --bundles dmg
+          - name: macOS Intel
+            platform: macos-15-intel
+            target: x86_64-apple-darwin
+            args: --target x86_64-apple-darwin --bundles dmg
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            libayatana-appindicator3-dev \
+            libclang-dev \
+            libdbus-1-dev \
+            libegl-dev \
+            libpipewire-0.3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwayland-dev \
+            libwebkit2gtk-4.1-dev \
+            libxcb1-dev \
+            libxdo-dev \
+            libxrandr-dev \
+            patchelf \
+            pkg-config \
+            xdg-utils
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          shared-key: release-${{ matrix.target }}
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Validate release version
+        run: npm run check:versions
+        env:
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
+      - name: Build and upload release assets
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLE_SIGNING_IDENTITY: ${{ runner.os == 'macOS' && '-' || '' }}
+        with:
+          tagName: ${{ github.event.inputs.tag || github.ref_name }}
+          releaseName: ToolDock ${{ github.event.inputs.tag || github.ref_name }}
+          releaseBody: |
+            Download the installer for your operating system from the assets below.
+            See the multilingual README files for installation and usage instructions.
+          generateReleaseNotes: true
+          releaseDraft: true
+          prerelease: false
+          uploadUpdaterJson: false
+          retryAttempts: 2
+          releaseAssetNamePattern: ToolDock_[version]_[platform]_[arch][setup].[ext]
+          args: ${{ matrix.args }}
