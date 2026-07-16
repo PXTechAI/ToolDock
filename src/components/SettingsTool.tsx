@@ -1,12 +1,18 @@
 import { useEffect, useState } from "react";
 import {
+  Activity,
   Check,
   FolderOpen,
+  Eye,
+  EyeOff,
   Image,
   KeyRound,
   Languages,
   LoaderCircle,
+  PanelTop,
   PanelTopClose,
+  PictureInPicture2,
+  Radio,
   RotateCcw,
   Settings,
   Type,
@@ -35,11 +41,12 @@ export function SettingsTool({
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState("");
+  const [lanPasswordVisible, setLanPasswordVisible] = useState(false);
   const t = createTranslator(draft.language);
 
   useEffect(() => setDraft(settings), [settings]);
 
-  async function browse(field: "screenshotDir" | "recordingDir") {
+  async function browse(field: "screenshotDir" | "recordingDir" | "lanReceiveDir") {
     const selected = await chooseDirectory(draft[field]);
     if (selected) setDraft((current) => ({ ...current, [field]: selected }));
   }
@@ -55,6 +62,11 @@ export function SettingsTool({
     ];
     if (new Set(shortcuts).size !== shortcuts.length) {
       setError(t("settings.duplicateShortcut"));
+      setSaving(false);
+      return;
+    }
+    if (draft.lanPassword.length > 0 && draft.lanPassword.length < 4) {
+      setError(t("settings.lanPasswordInvalid"));
       setSaving(false);
       return;
     }
@@ -238,6 +250,168 @@ export function SettingsTool({
           value={draft.recordingDir}
           onChange={(value) => setDraft((current) => ({ ...current, recordingDir: value }))}
           onBrowse={() => browse("recordingDir")}
+          browseLabel={t("common.browse")}
+        />
+      </div>
+
+      <div className="settings-section">
+        <div className="settings-section-heading">
+          <span className="heading-icon">
+            <Activity size={18} />
+          </span>
+          <div>
+            <strong>{t("settings.systemMonitor")}</strong>
+            <small>{t("settings.systemMonitorHint")}</small>
+          </div>
+        </div>
+
+        <div className="setting-row">
+          <span>
+            <strong>{t("settings.systemWidgetMode")}</strong>
+            <small>{t("settings.systemWidgetModeHint")}</small>
+          </span>
+          <div className="segmented widget-mode-setting">
+            <button
+              className={draft.systemWidgetMode === "floating" ? "active" : ""}
+              onClick={() =>
+                setDraft((current) => ({ ...current, systemWidgetMode: "floating" }))
+              }
+            >
+              <PictureInPicture2 size={14} />
+              {t("system.floatingMode")}
+            </button>
+            <button
+              className={draft.systemWidgetMode === "taskbar" ? "active" : ""}
+              onClick={() =>
+                setDraft((current) => ({ ...current, systemWidgetMode: "taskbar" }))
+              }
+            >
+              <PanelTop size={14} />
+              {t("system.taskbarMode")}
+            </button>
+          </div>
+        </div>
+
+        <div className="setting-row">
+          <span>
+            <strong>{t("settings.systemWidget")}</strong>
+            <small>{t("settings.systemWidgetHint")}</small>
+          </span>
+          <button
+            className={draft.systemWidgetEnabled ? "toggle active" : "toggle"}
+            aria-label={t("settings.systemWidget")}
+            onClick={() =>
+              setDraft((current) => ({
+                ...current,
+                systemWidgetEnabled: !current.systemWidgetEnabled,
+              }))
+            }
+          >
+            <span />
+          </button>
+        </div>
+
+        <div className="setting-row">
+          <span>
+            <strong>{t("settings.systemWidgetAlwaysOnTop")}</strong>
+            <small>{t("settings.systemWidgetAlwaysOnTopHint")}</small>
+          </span>
+          <button
+            className={draft.systemWidgetAlwaysOnTop ? "toggle active" : "toggle"}
+            aria-label={t("settings.systemWidgetAlwaysOnTop")}
+            disabled={!draft.systemWidgetEnabled || draft.systemWidgetMode === "taskbar"}
+            onClick={() =>
+              setDraft((current) => ({
+                ...current,
+                systemWidgetAlwaysOnTop: !current.systemWidgetAlwaysOnTop,
+              }))
+            }
+          >
+            <span />
+          </button>
+        </div>
+
+      </div>
+
+      <div className="settings-section">
+        <div className="settings-section-heading">
+          <span className="heading-icon">
+            <Radio size={18} />
+          </span>
+          <div>
+            <strong>{t("settings.lan")}</strong>
+            <small>{t("settings.lanHint")}</small>
+          </div>
+        </div>
+
+        <div className="setting-row">
+          <span>
+            <strong>{t("settings.lanEnabled")}</strong>
+            <small>{t("settings.lanEnabledHint")}</small>
+          </span>
+          <button
+            className={draft.lanEnabled ? "toggle active" : "toggle"}
+            onClick={() =>
+              setDraft((current) => ({ ...current, lanEnabled: !current.lanEnabled }))
+            }
+            role="switch"
+            aria-checked={draft.lanEnabled}
+            title={t("settings.lanEnabled")}
+          >
+            <span />
+          </button>
+        </div>
+
+        <div className="setting-row lan-setting-row">
+          <span>
+            <strong>{t("settings.lanDeviceName")}</strong>
+            <small>{t("settings.lanDeviceNameHint")}</small>
+          </span>
+          <input
+            className="setting-text-input"
+            value={draft.lanDeviceName}
+            disabled={!draft.lanEnabled}
+            onChange={(event) =>
+              setDraft((current) => ({ ...current, lanDeviceName: event.target.value }))
+            }
+          />
+        </div>
+
+        <div className="setting-row lan-setting-row">
+          <span>
+            <strong>{t("settings.lanPassword")}</strong>
+            <small>{t("settings.lanPasswordHint")}</small>
+          </span>
+          <div className="setting-password-input">
+            <input
+              type={lanPasswordVisible ? "text" : "password"}
+              value={draft.lanPassword}
+              disabled={!draft.lanEnabled}
+              placeholder={t("settings.lanPasswordPlaceholder")}
+              onChange={(event) =>
+                setDraft((current) => ({ ...current, lanPassword: event.target.value }))
+              }
+            />
+            <button
+              className="icon-button"
+              title={
+                lanPasswordVisible ? t("settings.hideLanPassword") : t("settings.showLanPassword")
+              }
+              onClick={() => setLanPasswordVisible((value) => !value)}
+              disabled={!draft.lanEnabled}
+            >
+              {lanPasswordVisible ? <EyeOff size={15} /> : <Eye size={15} />}
+            </button>
+          </div>
+        </div>
+
+        <FolderSetting
+          icon={FolderOpen}
+          label={t("settings.lanReceiveDir")}
+          detail={t("settings.lanReceiveDirHint")}
+          value={draft.lanReceiveDir}
+          onChange={(value) => setDraft((current) => ({ ...current, lanReceiveDir: value }))}
+          onBrowse={() => browse("lanReceiveDir")}
           browseLabel={t("common.browse")}
         />
       </div>

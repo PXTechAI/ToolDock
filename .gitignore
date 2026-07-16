@@ -14,3 +14,7 @@ Thumbs.db
 .idea
 .vscode
 src-tauri/binaries/ffmpeg-*
+src-tauri/binaries/tooldock-hardware-monitor-*
+src-tauri/binaries/PawnIO_setup.exe
+src-tauri/sidecars/**/bin/
+src-tauri/sidecars/**/obj/

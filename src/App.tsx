@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { register, unregisterAll } from "@tauri-apps/plugin-global-shortcut";
 import {
+  Activity,
   Camera,
   Check,
   Clipboard,
@@ -8,15 +9,18 @@ import {
   Crosshair,
   Dices,
   ExternalLink,
+  FileSearch,
   Hash,
   KeyRound,
   LoaderCircle,
+  Minus,
   Moon,
   Network,
   Palette,
   RefreshCw,
   Search,
   Settings,
+  Share2,
   ShieldAlert,
   Sparkles,
   Store,
@@ -30,17 +34,22 @@ import {
 } from "lucide-react";
 import {
   inspectPorts,
+  inspectProcesses,
   isDesktopApp,
   killProcesses,
+  listenSystemWidgetVisibility,
   loadSettings,
   openExternalUrl,
   pickScreenColor,
   saveSettings,
   showMainWindow,
+  chooseExecutable,
 } from "./lib/native";
 import { RecordingTool } from "./components/RecordingTool";
+import { LanTool } from "./components/LanTool";
 import { ScreenshotTool } from "./components/ScreenshotTool";
 import { SettingsTool } from "./components/SettingsTool";
+import { SystemMonitorTool } from "./components/SystemMonitorTool";
 import { ToolHeader } from "./components/ToolHeader";
 import { createTranslator, fontFamilies } from "./i18n";
 import type {
@@ -62,6 +71,8 @@ const tools: Array<{
   { id: "screenshot", labelKey: "nav.screenshot", detailKey: "nav.screenshotDetail", icon: Camera },
   { id: "recording", labelKey: "nav.recording", detailKey: "nav.recordingDetail", icon: Video },
   { id: "strings", labelKey: "nav.strings", detailKey: "nav.stringsDetail", icon: WandSparkles },
+  { id: "lan", labelKey: "nav.lan", detailKey: "nav.lanDetail", icon: Share2 },
+  { id: "system", labelKey: "nav.system", detailKey: "nav.systemDetail", icon: Activity },
 ];
 
 const stringCharsets = {
@@ -76,6 +87,9 @@ type StringMode = keyof typeof stringCharsets | "uuid";
 let shortcutRegistrationQueue: Promise<void> = Promise.resolve();
 const PORT_INPUT_KEY = "tooldock-port-input";
 const PORT_HISTORY_KEY = "tooldock-port-history";
+const PROCESS_INPUT_KEY = "tooldock-process-input";
+const PROCESS_HISTORY_KEY = "tooldock-process-history";
+type ProcessQueryMode = "port" | "process" | "executable";
 
 const routeMarketUrl =
   "https://routemarket.ai/?utm_source=tooldock&utm_medium=desktop_app&utm_campaign=sidebar_promo&utm_content=routemarket";
@@ -152,11 +166,38 @@ function App() {
     screenshotShortcut: "CommandOrControl+Alt+S",
     recordingShortcut: "CommandOrControl+Alt+R",
     closeToTray: true,
+    lanEnabled: true,
+    lanDeviceId: "",
+    lanDeviceName: "ToolDock Device",
+    lanPassword: "",
+    lanReceiveDir: "",
+    systemWidgetEnabled: false,
+    systemWidgetAlwaysOnTop: true,
+    systemWidgetMode: "floating",
+    systemWidgetMetrics: ["cpu", "memory", "temperature", "download", "upload"],
+    systemTrayMetric: "none",
   });
   const [colorShortcutTrigger, setColorShortcutTrigger] = useState(0);
   const [screenshotShortcutTrigger, setScreenshotShortcutTrigger] = useState(0);
   const [recordingShortcutTrigger, setRecordingShortcutTrigger] = useState(0);
   const t = createTranslator(settings.language);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listenSystemWidgetVisibility((visible) => {
+      if (!disposed) {
+        setSettings((current) => ({ ...current, systemWidgetEnabled: visible }));
+      }
+    }).then((stop) => {
+      if (disposed) stop();
+      else unlisten = stop;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
 
   useEffect(() => {
     loadSettings()
@@ -318,7 +359,7 @@ function App() {
           <div className="sidebar-footer">
             <span className="status-dot" />
             <span title={status}>{status}</span>
-            <kbd>v0.1</kbd>
+            <kbd>v0.1.2</kbd>
           </div>
         </div>
       </aside>
@@ -349,6 +390,16 @@ function App() {
         {activeTool === "strings" && (
           <StringTool language={settings.language} onStatus={setStatus} />
         )}
+        {activeTool === "lan" && (
+          <LanTool settings={settings} onSaveSettings={persistSettings} onStatus={setStatus} />
+        )}
+        {activeTool === "system" && (
+          <SystemMonitorTool
+            settings={settings}
+            onSaveSettings={persistSettings}
+            onStatus={setStatus}
+          />
+        )}
         {activeTool === "settings" && (
           <SettingsTool settings={settings} onSave={persistSettings} onStatus={setStatus} />
         )}
@@ -368,14 +419,26 @@ function PortsTool({
   const [portInput, setPortInput] = useState(
     () => window.localStorage.getItem(PORT_INPUT_KEY) || "3000, 5173, 8000-8003",
   );
-  const [recentQueries, setRecentQueries] = useState<string[]>(() => {
+  const [recentPortQueries, setRecentPortQueries] = useState<string[]>(() => {
     try {
       return JSON.parse(window.localStorage.getItem(PORT_HISTORY_KEY) || "[]");
     } catch {
       return [];
     }
   });
+  const [recentProcessQueries, setRecentProcessQueries] = useState<string[]>(() => {
+    try {
+      return JSON.parse(window.localStorage.getItem(PROCESS_HISTORY_KEY) || "[]");
+    } catch {
+      return [];
+    }
+  });
   const [processes, setProcesses] = useState<PortProcess[]>([]);
+  const [queryMode, setQueryMode] = useState<ProcessQueryMode>("port");
+  const [processQuery, setProcessQuery] = useState(
+    () => window.localStorage.getItem(PROCESS_INPUT_KEY) || "",
+  );
+  const [executablePath, setExecutablePath] = useState("");
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -383,21 +446,59 @@ function PortsTool({
 
   const ports = useMemo(() => parsePorts(portInput), [portInput]);
   const selectedProcesses = processes.filter((item) => selected.has(item.pid));
+  const selectablePids = useMemo(
+    () => [...new Set(processes.map((item) => item.pid).filter((pid) => pid > 0))],
+    [processes],
+  );
+  const allSelected = selectablePids.length > 0 && selectablePids.every((pid) => selected.has(pid));
+  const someSelected = selectablePids.some((pid) => selected.has(pid));
+  const selectAllRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     window.localStorage.setItem(PORT_INPUT_KEY, portInput);
   }, [portInput]);
 
+  useEffect(() => {
+    window.localStorage.setItem(PROCESS_INPUT_KEY, processQuery);
+  }, [processQuery]);
+
+  useEffect(() => {
+    if (selectAllRef.current) {
+      selectAllRef.current.indeterminate = someSelected && !allSelected;
+    }
+  }, [allSelected, someSelected]);
+
   async function runInspect() {
-    if (!ports.length) {
+    if (queryMode === "port" && !ports.length) {
       setError(t("ports.invalid"));
       return;
     }
-    const normalizedQuery = portInput.trim();
-    if (normalizedQuery) {
-      setRecentQueries((current) => {
-        const next = [normalizedQuery, ...current.filter((item) => item !== normalizedQuery)].slice(0, 6);
+    if (queryMode === "process" && !processQuery.trim()) {
+      setError(t("ports.processInvalid"));
+      return;
+    }
+    if (queryMode === "executable" && !executablePath) {
+      setError(t("ports.executableInvalid"));
+      return;
+    }
+    if (queryMode === "port") {
+      const normalizedQuery = portInput.trim();
+      setRecentPortQueries((current) => {
+        const next = [normalizedQuery, ...current.filter((item) => item !== normalizedQuery)].slice(
+          0,
+          6,
+        );
         window.localStorage.setItem(PORT_HISTORY_KEY, JSON.stringify(next));
+        return next;
+      });
+    } else if (queryMode === "process") {
+      const normalizedQuery = processQuery.trim();
+      setRecentProcessQueries((current) => {
+        const next = [normalizedQuery, ...current.filter((item) => item !== normalizedQuery)].slice(
+          0,
+          6,
+        );
+        window.localStorage.setItem(PROCESS_HISTORY_KEY, JSON.stringify(next));
         return next;
       });
     }
@@ -405,10 +506,17 @@ function PortsTool({
     setError("");
     onStatus(t("ports.scanning"));
     try {
-      const result = await inspectPorts(ports);
+      const result =
+        queryMode === "port"
+          ? await inspectPorts(ports)
+          : await inspectProcesses(processQuery, queryMode === "executable" ? executablePath : undefined);
       setProcesses(result);
       setSelected(new Set());
-      onStatus(t("ports.queried", { count: ports.length }));
+      onStatus(
+        queryMode === "port"
+          ? t("ports.queried", { count: ports.length })
+          : t("ports.processQueried", { count: result.length }),
+      );
     } catch (reason) {
       setError(String(reason));
       onStatus(t("ports.scanFailed"));
@@ -441,12 +549,17 @@ function PortsTool({
   }
 
   function togglePid(pid: number) {
+    if (pid <= 0) return;
     setSelected((current) => {
       const next = new Set(current);
       if (next.has(pid)) next.delete(pid);
       else next.add(pid);
       return next;
     });
+  }
+
+  function toggleAllPids() {
+    setSelected(allSelected ? new Set() : new Set(selectablePids));
   }
 
   return (
@@ -463,16 +576,59 @@ function PortsTool({
       />
 
       <div className="query-bar">
+        <div className="segmented process-query-modes">
+          {(["port", "process", "executable"] as ProcessQueryMode[]).map((mode) => (
+            <button
+              className={queryMode === mode ? "active" : ""}
+              key={mode}
+              onClick={() => {
+                setQueryMode(mode);
+                setError("");
+              }}
+            >
+              {t(`ports.mode.${mode}`)}
+            </button>
+          ))}
+        </div>
         <div className="input-wrap">
-          <TerminalSquare size={18} />
-          <input
-            value={portInput}
-            onChange={(event) => setPortInput(event.target.value)}
-            onKeyDown={(event) => event.key === "Enter" && runInspect()}
-            placeholder="3000, 5173, 8000-8010"
-            aria-label={t("ports.port")}
-          />
-          <span>{t("ports.count", { count: ports.length })}</span>
+          {queryMode === "executable" ? <FileSearch size={18} /> : <TerminalSquare size={18} />}
+          {queryMode === "port" ? (
+            <input
+              value={portInput}
+              onChange={(event) => setPortInput(event.target.value)}
+              onKeyDown={(event) => event.key === "Enter" && runInspect()}
+              placeholder="3000, 5173, 8000-8010"
+              aria-label={t("ports.port")}
+            />
+          ) : queryMode === "process" ? (
+            <input
+              value={processQuery}
+              onChange={(event) => setProcessQuery(event.target.value)}
+              onKeyDown={(event) => event.key === "Enter" && runInspect()}
+              placeholder={t("ports.processPlaceholder")}
+              aria-label={t("ports.processName")}
+            />
+          ) : (
+            <input
+              value={executablePath}
+              readOnly
+              placeholder={t("ports.executablePlaceholder")}
+              aria-label={t("ports.executable")}
+            />
+          )}
+          {queryMode === "port" ? (
+            <span>{t("ports.count", { count: ports.length })}</span>
+          ) : queryMode === "executable" ? (
+            <button
+              className="inline-browse-button"
+              onClick={async () => {
+                const path = await chooseExecutable();
+                if (path) setExecutablePath(path);
+              }}
+            >
+              {t("common.browse")}
+            </button>
+          ) : null}
         </div>
         <button className="primary-button" onClick={runInspect} disabled={loading}>
           {loading ? <LoaderCircle className="spin" size={17} /> : <Search size={17} />}
@@ -482,12 +638,21 @@ function PortsTool({
 
       <div className="tip-line">
         <Sparkles size={15} />
-        {t("ports.tip")}
+        {t(`ports.tip.${queryMode}`)}
       </div>
-      {recentQueries.length > 0 && (
+      {queryMode === "port" && recentPortQueries.length > 0 && (
         <div className="quick-values port-query-history" aria-label={t("ports.recent")}>
-          {recentQueries.map((query) => (
+          {recentPortQueries.map((query) => (
             <button key={query} onClick={() => setPortInput(query)}>
+              {query}
+            </button>
+          ))}
+        </div>
+      )}
+      {queryMode === "process" && recentProcessQueries.length > 0 && (
+        <div className="quick-values port-query-history" aria-label={t("ports.recent")}>
+          {recentProcessQueries.map((query) => (
+            <button key={query} onClick={() => setProcessQuery(query)}>
               {query}
             </button>
           ))}
@@ -510,7 +675,11 @@ function PortsTool({
             <strong>{processes.length ? t("ports.records", { count: processes.length }) : t("ports.results")}</strong>
             <span>
               {processes.length
-                ? t("ports.coverage", { count: new Set(processes.map((item) => item.port)).size })
+                ? queryMode === "port"
+                  ? t("ports.coverage", {
+                      count: new Set(processes.flatMap((item) => item.ports)).size,
+                    })
+                  : t("ports.processCoverage", { count: processes.length })
                 : t("ports.notQueried")}
             </span>
           </div>
@@ -527,7 +696,22 @@ function PortsTool({
         {processes.length ? (
           <div className="process-table">
             <div className="process-row process-head">
-              <span />
+              <label
+                className={
+                  allSelected || someSelected ? "checkbox checked process-select-all" : "checkbox process-select-all"
+                }
+                title={t("ports.selectAll")}
+              >
+                <input
+                  ref={selectAllRef}
+                  type="checkbox"
+                  checked={allSelected}
+                  onChange={toggleAllPids}
+                  aria-label={t("ports.selectAll")}
+                />
+                {allSelected && <Check size={13} />}
+                {someSelected && !allSelected && <Minus size={13} />}
+              </label>
               <span>{t("ports.port")}</span>
               <span>{t("ports.process")}</span>
               <span>PID</span>
@@ -535,7 +719,7 @@ function PortsTool({
               <span>{t("ports.memory")}</span>
             </div>
             {processes.map((process) => (
-              <label className="process-row" key={`${process.port}-${process.protocol}-${process.pid}`}>
+              <label className="process-row" key={`${process.port ?? "none"}-${process.protocol}-${process.pid}`}>
                 <span className={selected.has(process.pid) ? "checkbox checked" : "checkbox"}>
                   <input
                     type="checkbox"
@@ -545,8 +729,10 @@ function PortsTool({
                   {selected.has(process.pid) && <Check size={13} />}
                 </span>
                 <span>
-                  <strong className="port-number">{process.port}</strong>
-                  <small>{process.protocol}</small>
+                  <strong className="port-number">
+                    {process.ports.length ? process.ports.slice(0, 3).join(", ") : "-"}
+                  </strong>
+                  <small>{process.protocol || "-"}</small>
                 </span>
                 <span className="process-cell">
                   <span className="process-icon">
@@ -560,7 +746,7 @@ function PortsTool({
                 <code>{process.pid || "-"}</code>
                 <span>
                   <span className={process.state === "LISTEN" ? "state listening" : "state"}>
-                    {process.state || "BOUND"}
+                    {process.state || "-"}
                   </span>
                 </span>
                 <span className="memory">{formatBytes(process.memoryBytes)}</span>

@@ -9,6 +9,10 @@ import type {
   ColorSample,
   DesktopRegionSelection,
   KillResult,
+  LanClipboardRecord,
+  LanDevice,
+  LanStatus,
+  LanTransferRecord,
   MonitorInfo,
   PortProcess,
   RecordingCapabilities,
@@ -17,6 +21,7 @@ import type {
   RecordingResult,
   RecordingStatus,
   ScreenshotResult,
+  SystemMetrics,
 } from "../types";
 
 const inTauri = () => "__TAURI_INTERNALS__" in window;
@@ -32,6 +37,16 @@ const demoSettings: AppSettings = {
   screenshotShortcut: "CommandOrControl+Alt+S",
   recordingShortcut: "CommandOrControl+Alt+R",
   closeToTray: true,
+  lanEnabled: true,
+  lanDeviceId: "td-browser-preview",
+  lanDeviceName: "Browser Preview",
+  lanPassword: "123456",
+  lanReceiveDir: "Downloads/ToolDock/Received",
+  systemWidgetEnabled: false,
+  systemWidgetAlwaysOnTop: true,
+  systemWidgetMode: "floating",
+  systemWidgetMetrics: ["cpu", "memory", "temperature", "download", "upload"],
+  systemTrayMetric: "none",
 };
 
 export const isDesktopApp = inTauri;
@@ -68,6 +83,7 @@ export async function copyLocalFile(path: string): Promise<void> {
 const demoProcesses: PortProcess[] = [
   {
     port: 5173,
+    ports: [5173],
     protocol: "TCP",
     state: "LISTEN",
     pid: 24816,
@@ -78,6 +94,7 @@ const demoProcesses: PortProcess[] = [
   },
   {
     port: 3000,
+    ports: [3000],
     protocol: "TCP",
     state: "LISTEN",
     pid: 19304,
@@ -106,7 +123,7 @@ async function withHiddenWindow<T>(task: () => Promise<T>): Promise<T> {
 export async function inspectPorts(ports: number[]): Promise<PortProcess[]> {
   if (!inTauri()) {
     await new Promise((resolve) => window.setTimeout(resolve, 420));
-    return demoProcesses.filter((item) => ports.includes(item.port));
+    return demoProcesses.filter((item) => item.port !== null && ports.includes(item.port));
   }
   return invoke<PortProcess[]>("inspect_ports", { ports });
 }
@@ -158,6 +175,104 @@ export async function saveSettings(settings: AppSettings): Promise<AppSettings> 
 export async function chooseDirectory(initial?: string): Promise<string | null> {
   if (!inTauri()) return initial || null;
   return invoke<string | null>("choose_directory", { initial: initial || null });
+}
+
+export async function inspectProcesses(
+  query: string,
+  executablePath?: string,
+): Promise<PortProcess[]> {
+  if (!inTauri()) {
+    const normalized = query.toLowerCase();
+    return demoProcesses.filter(
+      (item) =>
+        (executablePath && item.executable.toLowerCase() === executablePath.toLowerCase()) ||
+        item.processName.toLowerCase().includes(normalized) ||
+        item.executable.toLowerCase().includes(normalized),
+    );
+  }
+  return invoke<PortProcess[]>("inspect_processes", {
+    query,
+    executablePath: executablePath || null,
+  });
+}
+
+export async function chooseFiles(): Promise<string[]> {
+  if (!inTauri()) return [];
+  return invoke<string[]>("choose_files");
+}
+
+export async function chooseExecutable(): Promise<string | null> {
+  if (!inTauri()) return demoProcesses[0]?.executable ?? null;
+  return invoke<string | null>("choose_executable");
+}
+
+export async function getLanStatus(): Promise<LanStatus> {
+  if (!inTauri()) {
+    return {
+      enabled: true,
+      localDevice: {
+        id: demoSettings.lanDeviceId,
+        name: demoSettings.lanDeviceName,
+        address: "127.0.0.1",
+        port: 38421,
+        passwordRequired: true,
+        lastSeenMs: Date.now(),
+        connected: true,
+      },
+      receiveDir: demoSettings.lanReceiveDir,
+    };
+  }
+  return invoke<LanStatus>("lan_status");
+}
+
+export async function listLanDevices(): Promise<LanDevice[]> {
+  if (!inTauri()) return [];
+  return invoke<LanDevice[]>("list_lan_devices");
+}
+
+export async function connectLanDevice(deviceId: string, password: string): Promise<LanDevice> {
+  return invoke<LanDevice>("connect_lan_device", { deviceId, password });
+}
+
+export async function disconnectLanDevice(deviceId: string): Promise<void> {
+  if (!inTauri()) return;
+  await invoke("disconnect_lan_device", { deviceId });
+}
+
+export async function sendLanFiles(
+  deviceId: string,
+  paths: string[],
+): Promise<LanTransferRecord[]> {
+  return invoke<LanTransferRecord[]>("send_lan_files", { deviceId, paths });
+}
+
+export async function listLanTransfers(): Promise<LanTransferRecord[]> {
+  if (!inTauri()) return [];
+  return invoke<LanTransferRecord[]>("list_lan_transfers");
+}
+
+export async function readLanClipboard(): Promise<string> {
+  if (!inTauri()) return navigator.clipboard.readText();
+  return invoke<string>("read_lan_clipboard");
+}
+
+export async function sendLanClipboard(
+  text: string,
+  deviceIds: string[],
+): Promise<LanClipboardRecord[]> {
+  return invoke<LanClipboardRecord[]>("send_lan_clipboard", { text, deviceIds });
+}
+
+export async function listLanClipboardHistory(): Promise<LanClipboardRecord[]> {
+  if (!inTauri()) return [];
+  return invoke<LanClipboardRecord[]>("list_lan_clipboard_history");
+}
+
+export async function listenLanClipboardReceived(
+  handler: (record: LanClipboardRecord) => void,
+): Promise<UnlistenFn> {
+  if (!inTauri()) return () => undefined;
+  return listen<LanClipboardRecord>("lan-clipboard-received", (event) => handler(event.payload));
 }
 
 export async function captureScreenshot(
@@ -219,7 +334,6 @@ export async function selectDesktopRegion(
       }
     });
     await appWindow.hide();
-    await new Promise((resolve) => window.setTimeout(resolve, 40));
     await invoke("open_region_selector", { purpose });
     return await result;
   } finally {
@@ -276,7 +390,6 @@ export async function pickScreenColor(): Promise<ColorSample> {
       }
     });
     await appWindow.hide();
-    await new Promise((resolve) => window.setTimeout(resolve, 40));
     await invoke("open_color_picker");
     return await result;
   } finally {
@@ -336,4 +449,45 @@ export async function listenRecordingPreview(
 export async function showMainWindow(): Promise<void> {
   if (!inTauri()) return;
   await invoke("show_main_window");
+}
+
+export async function getSystemMetrics(): Promise<SystemMetrics> {
+  if (!inTauri()) {
+    return {
+      cpuUsage: 27,
+      memoryUsedBytes: 9.6 * 1024 ** 3,
+      memoryTotalBytes: 32 * 1024 ** 3,
+      memoryUsage: 30,
+      cpuTemperatureC: 54,
+      fanRpm: null,
+      networkDownloadBytesPerSecond: 91.4 * 1024,
+      networkUploadBytesPerSecond: 660 * 1024,
+      timestampMs: Date.now(),
+    };
+  }
+  return invoke<SystemMetrics>("system_metrics");
+}
+
+export async function listenSystemMetrics(
+  handler: (metrics: SystemMetrics) => void,
+): Promise<UnlistenFn> {
+  if (!inTauri()) return () => undefined;
+  return listen<SystemMetrics>("system-metrics", (event) => handler(event.payload));
+}
+
+export async function showSystemWidget(): Promise<void> {
+  if (!inTauri()) return;
+  await invoke("show_system_widget");
+}
+
+export async function hideSystemWidget(): Promise<void> {
+  if (!inTauri()) return;
+  await invoke("hide_system_widget");
+}
+
+export async function listenSystemWidgetVisibility(
+  handler: (visible: boolean) => void,
+): Promise<UnlistenFn> {
+  if (!inTauri()) return () => undefined;
+  return listen<boolean>("system-widget-visibility", (event) => handler(event.payload));
 }

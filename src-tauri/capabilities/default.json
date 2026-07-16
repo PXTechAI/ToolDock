@@ -2,12 +2,13 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Capabilities for the ToolDock main window",
-  "windows": ["main", "color-picker-*", "region-selector-*"],
+  "windows": ["main", "system-widget", "color-picker-*", "region-selector-*"],
   "permissions": [
     "core:default",
     "core:window:allow-hide",
     "core:window:allow-show",
     "core:window:allow-set-focus",
+    "core:window:allow-start-dragging",
     "global-shortcut:allow-register",
     "global-shortcut:allow-unregister-all",
     {

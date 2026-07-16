@@ -104,6 +104,23 @@ jobs:
         env:
           TOOLDOCK_TARGET_TRIPLE: ${{ matrix.target }}
 
+      - name: Set up .NET
+        if: runner.os == 'Windows'
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Prepare hardware monitor sidecar
+        run: npm run prepare:hardware-monitor
+        env:
+          TOOLDOCK_TARGET_TRIPLE: ${{ matrix.target }}
+
+      - name: Prepare PawnIO installer
+        if: runner.os == 'Windows'
+        run: npm run prepare:pawnio
+        env:
+          TOOLDOCK_TARGET_TRIPLE: ${{ matrix.target }}
+
       - name: Detect Apple signing configuration
         id: apple-signing
         if: runner.os == 'macOS'
@@ -225,3 +242,35 @@ jobs:
           if [[ -n "${TOOLDOCK_KEYCHAIN_PATH:-}" ]]; then
             security delete-keychain "$TOOLDOCK_KEYCHAIN_PATH" || true
           fi
+
+  publish:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Publish completed release
+        uses: actions/github-script@v8
+        env:
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const { owner, repo } = context.repo;
+            const tag = process.env.RELEASE_TAG;
+            const { data: release } = await github.rest.repos.getReleaseByTag({
+              owner,
+              repo,
+              tag,
+            });
+
+            if (release.draft) {
+              await github.rest.repos.updateRelease({
+                owner,
+                repo,
+                release_id: release.id,
+                draft: false,
+                prerelease: false,
+                make_latest: "true",
+              });
+            }

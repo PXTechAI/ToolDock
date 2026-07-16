@@ -1,0 +1,10 @@
+LibreHardwareMonitor
+Copyright (C) 2010-2020 Michael Moller
+Copyright (C) 2011-2026 LibreHardwareMonitor contributors
+
+ToolDock uses the unmodified LibreHardwareMonitorLib package to read optional
+CPU temperature and fan sensors on Windows.
+
+License: Mozilla Public License 2.0
+Source: https://github.com/LibreHardwareMonitor/LibreHardwareMonitor
+Package: https://www.nuget.org/packages/LibreHardwareMonitorLib/0.9.6

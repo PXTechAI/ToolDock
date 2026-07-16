@@ -9,19 +9,22 @@ use netstat2::{get_sockets_info, AddressFamilyFlags, ProtocolFlags, ProtocolSock
 use serde::{Deserialize, Serialize};
 use std::{
     borrow::Cow,
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     fs,
     io::{Cursor, Read, Write},
     path::{Path, PathBuf},
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
     sync::{
+        atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, Sender, SyncSender, TryRecvError, TrySendError},
-        Mutex,
+        Arc, Mutex,
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use sysinfo::{Pid, System};
+use sysinfo::{Networks, Pid, System};
+#[cfg(target_os = "windows")]
+use sysinfo::{ProcessRefreshKind, ProcessesToUpdate};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -39,8 +42,13 @@ use windows::Win32::{
 #[cfg(target_os = "windows")]
 use windows_capture::{
     capture::{CaptureControl, Context as WindowsCaptureContext, GraphicsCaptureApiHandler},
+    encoder::{
+        AudioSettingsBuilder, ContainerSettingsBuilder, VideoEncoder, VideoSettingsBuilder,
+        VideoSettingsSubType,
+    },
     frame::Frame as WindowsCaptureFrame,
     graphics_capture_api::InternalCaptureControl,
+    monitor::Monitor as WindowsCaptureMonitor,
     settings::{
         ColorFormat as WindowsCaptureColorFormat, CursorCaptureSettings, DirtyRegionSettings,
         DrawBorderSettings, MinimumUpdateIntervalSettings, SecondaryWindowSettings,
@@ -55,10 +63,19 @@ use xcap::{
 #[cfg(target_os = "linux")]
 use xcap::{Frame, VideoRecorder};
 
+mod lan;
+
+use lan::{
+    connect_lan_device, disconnect_lan_device, lan_status, list_lan_clipboard_history,
+    list_lan_devices, list_lan_transfers, read_lan_clipboard, send_lan_clipboard, send_lan_files,
+    LanConfig, LanState,
+};
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PortProcess {
-    port: u16,
+    port: Option<u16>,
+    ports: Vec<u16>,
     protocol: String,
     state: String,
     pid: u32,
@@ -206,6 +223,26 @@ struct AppSettings {
     recording_shortcut: String,
     #[serde(default = "default_true")]
     close_to_tray: bool,
+    #[serde(default = "default_true")]
+    lan_enabled: bool,
+    #[serde(default = "default_lan_device_id")]
+    lan_device_id: String,
+    #[serde(default = "default_lan_device_name")]
+    lan_device_name: String,
+    #[serde(default = "default_lan_password")]
+    lan_password: String,
+    #[serde(default = "default_lan_receive_folder_string")]
+    lan_receive_dir: String,
+    #[serde(default)]
+    system_widget_enabled: bool,
+    #[serde(default = "default_true")]
+    system_widget_always_on_top: bool,
+    #[serde(default = "default_system_widget_mode")]
+    system_widget_mode: String,
+    #[serde(default = "default_system_widget_metrics")]
+    system_widget_metrics: Vec<String>,
+    #[serde(default = "default_system_tray_metric")]
+    system_tray_metric: String,
 }
 
 struct TrayMenuState {
@@ -213,7 +250,245 @@ struct TrayMenuState {
     quit_item: MenuItem<tauri::Wry>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SystemMetrics {
+    cpu_usage: f32,
+    memory_used_bytes: u64,
+    memory_total_bytes: u64,
+    memory_usage: f32,
+    cpu_temperature_c: Option<f32>,
+    fan_rpm: Option<u32>,
+    network_download_bytes_per_second: f64,
+    network_upload_bytes_per_second: f64,
+    timestamp_ms: u64,
+}
+
+#[derive(Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct HardwareSensors {
+    cpu_temperature_c: Option<f32>,
+    fan_rpm: Option<u32>,
+    #[serde(default)]
+    timestamp_ms: u64,
+}
+
+struct SystemSampler {
+    system: System,
+    networks: Networks,
+    last_network_refresh: Instant,
+    network_initialized: bool,
+    #[cfg(target_os = "windows")]
+    cpu_sampler: WindowsCpuSampler,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct ProcessCpuKey {
+    pid: u32,
+    start_time: u64,
+}
+
+#[cfg(target_os = "windows")]
+struct WindowsCpuSampler {
+    previous: HashMap<ProcessCpuKey, u64>,
+    last_sample: Instant,
+    logical_processor_count: usize,
+}
+
+#[cfg(target_os = "windows")]
+impl WindowsCpuSampler {
+    fn new(system: &mut System) -> Self {
+        // Some hardware drivers can corrupt Windows' global idle counters. Process
+        // CPU time remains reliable and matches Task Manager on affected systems.
+        Self {
+            previous: refresh_process_cpu_times(system),
+            last_sample: Instant::now(),
+            logical_processor_count: thread::available_parallelism()
+                .map(|count| count.get())
+                .unwrap_or(1),
+        }
+    }
+
+    fn sample(&mut self, system: &mut System, now: Instant) -> f32 {
+        let current = refresh_process_cpu_times(system);
+        let usage = calculate_process_cpu_usage(
+            &self.previous,
+            &current,
+            now.saturating_duration_since(self.last_sample),
+            self.logical_processor_count,
+        );
+        self.previous = current;
+        self.last_sample = now;
+        usage
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn refresh_process_cpu_times(system: &mut System) -> HashMap<ProcessCpuKey, u64> {
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing().with_cpu().without_tasks(),
+    );
+    system
+        .processes()
+        .iter()
+        .map(|(pid, process)| {
+            (
+                ProcessCpuKey {
+                    pid: pid.as_u32(),
+                    start_time: process.start_time(),
+                },
+                process.accumulated_cpu_time(),
+            )
+        })
+        .collect()
+}
+
+#[cfg(target_os = "windows")]
+fn calculate_process_cpu_usage(
+    previous: &HashMap<ProcessCpuKey, u64>,
+    current: &HashMap<ProcessCpuKey, u64>,
+    elapsed: Duration,
+    logical_processor_count: usize,
+) -> f32 {
+    if elapsed.is_zero() || logical_processor_count == 0 {
+        return 0.0;
+    }
+    let used_cpu_ms = current
+        .iter()
+        .filter_map(|(key, total)| {
+            previous
+                .get(key)
+                .map(|previous_total| total.saturating_sub(*previous_total))
+        })
+        .sum::<u64>();
+    let available_cpu_ms = elapsed.as_secs_f64() * 1_000.0 * logical_processor_count as f64;
+    let usage = used_cpu_ms as f64 / available_cpu_ms * 100.0;
+    if usage.is_finite() {
+        usage.clamp(0.0, 100.0) as f32
+    } else {
+        0.0
+    }
+}
+
+impl Default for SystemSampler {
+    fn default() -> Self {
+        let mut system = System::new();
+        system.refresh_memory();
+        #[cfg(not(target_os = "windows"))]
+        system.refresh_cpu_usage();
+        #[cfg(target_os = "windows")]
+        let cpu_sampler = WindowsCpuSampler::new(&mut system);
+        Self {
+            system,
+            networks: Networks::new_with_refreshed_list(),
+            last_network_refresh: Instant::now(),
+            network_initialized: false,
+            #[cfg(target_os = "windows")]
+            cpu_sampler,
+        }
+    }
+}
+
+impl SystemSampler {
+    fn sample(&mut self) -> SystemMetrics {
+        let now = Instant::now();
+        let elapsed = now
+            .duration_since(self.last_network_refresh)
+            .as_secs_f64()
+            .max(0.001);
+
+        #[cfg(not(target_os = "windows"))]
+        self.system.refresh_cpu_usage();
+        self.system.refresh_memory();
+        self.networks.refresh(false);
+
+        let received = self
+            .networks
+            .values()
+            .map(|network| network.received())
+            .sum::<u64>();
+        let transmitted = self
+            .networks
+            .values()
+            .map(|network| network.transmitted())
+            .sum::<u64>();
+        let (download, upload) = if self.network_initialized {
+            (received as f64 / elapsed, transmitted as f64 / elapsed)
+        } else {
+            (0.0, 0.0)
+        };
+        self.network_initialized = true;
+        self.last_network_refresh = now;
+
+        let memory_total_bytes = self.system.total_memory();
+        let memory_used_bytes = self.system.used_memory();
+        let memory_usage = if memory_total_bytes == 0 {
+            0.0
+        } else {
+            memory_used_bytes as f32 / memory_total_bytes as f32 * 100.0
+        };
+        #[cfg(target_os = "windows")]
+        let cpu_usage = self.cpu_sampler.sample(&mut self.system, now);
+        #[cfg(not(target_os = "windows"))]
+        let cpu_usage = self.system.global_cpu_usage();
+
+        SystemMetrics {
+            cpu_usage,
+            memory_used_bytes,
+            memory_total_bytes,
+            memory_usage,
+            cpu_temperature_c: None,
+            fan_rpm: None,
+            network_download_bytes_per_second: download,
+            network_upload_bytes_per_second: upload,
+            timestamp_ms: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
+        }
+    }
+}
+
+struct SystemMonitorState {
+    latest: Mutex<Option<SystemMetrics>>,
+    tray_metric: Mutex<String>,
+    taskbar_widget: Mutex<TaskbarWidgetState>,
+    hardware: Mutex<HardwareSensors>,
+}
+
+struct TaskbarWidgetState {
+    enabled: bool,
+    metrics: Vec<String>,
+    current_index: usize,
+    last_rotation: Instant,
+}
+
+impl Default for TaskbarWidgetState {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            metrics: default_system_widget_metrics(),
+            current_index: 0,
+            last_rotation: Instant::now(),
+        }
+    }
+}
+
+impl Default for SystemMonitorState {
+    fn default() -> Self {
+        Self {
+            latest: Mutex::new(None),
+            tray_metric: Mutex::new(default_system_tray_metric()),
+            taskbar_widget: Mutex::new(TaskbarWidgetState::default()),
+            hardware: Mutex::new(HardwareSensors::default()),
+        }
+    }
+}
+
+#[derive(Clone, Deserialize)]
 #[serde(
     tag = "kind",
     rename_all = "camelCase",
@@ -232,6 +507,20 @@ enum RecordingSourceConfig {
     },
 }
 
+#[derive(Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum RecordingAudioSource {
+    None,
+    System,
+    Microphone,
+}
+
+impl Default for RecordingAudioSource {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RecordingConfig {
@@ -241,7 +530,7 @@ struct RecordingConfig {
     fps: u32,
     bitrate_kbps: u32,
     #[serde(default)]
-    audio_enabled: bool,
+    audio_source: RecordingAudioSource,
     audio_input_id: Option<String>,
     output_directory: Option<String>,
 }
@@ -379,7 +668,8 @@ async fn inspect_ports(ports: Vec<u16>) -> Result<Vec<PortProcess>, String> {
                 let key = (port, protocol.clone(), 0);
                 if seen.insert(key) {
                     rows.push(PortProcess {
-                        port,
+                        port: Some(port),
+                        ports: vec![port],
                         protocol,
                         state,
                         pid: 0,
@@ -400,7 +690,8 @@ async fn inspect_ports(ports: Vec<u16>) -> Result<Vec<PortProcess>, String> {
 
                 let process = system.process(Pid::from_u32(pid_value));
                 rows.push(PortProcess {
-                    port,
+                    port: Some(port),
+                    ports: vec![port],
                     protocol: protocol.clone(),
                     state: state.clone(),
                     pid: pid_value,
@@ -425,11 +716,128 @@ async fn inspect_ports(ports: Vec<u16>) -> Result<Vec<PortProcess>, String> {
             }
         }
 
-        rows.sort_by_key(|item| (item.port, item.pid));
+        rows.sort_by_key(|item| (item.port.unwrap_or_default(), item.pid));
         Ok(rows)
     })
     .await
     .map_err(|error| format!("端口查询任务失败：{error}"))?
+}
+
+#[tauri::command]
+async fn inspect_processes(
+    query: String,
+    executable_path: Option<String>,
+) -> Result<Vec<PortProcess>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let query = query.trim().to_lowercase();
+        let selected_path = executable_path
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| normalize_process_path(Path::new(&value)));
+        if query.is_empty() && selected_path.is_none() {
+            return Ok(Vec::new());
+        }
+
+        let af_flags = AddressFamilyFlags::IPV4 | AddressFamilyFlags::IPV6;
+        let proto_flags = ProtocolFlags::TCP | ProtocolFlags::UDP;
+        let sockets = get_sockets_info(af_flags, proto_flags)
+            .map_err(|error| format!("Unable to read local socket information: {error}"))?;
+        let mut socket_map: HashMap<u32, Vec<(u16, String, String)>> = HashMap::new();
+        for socket in sockets {
+            let (port, protocol, state) = match socket.protocol_socket_info {
+                ProtocolSocketInfo::Tcp(tcp) => (
+                    tcp.local_port,
+                    "TCP".to_string(),
+                    tcp_state_label(tcp.state),
+                ),
+                ProtocolSocketInfo::Udp(udp) => {
+                    (udp.local_port, "UDP".to_string(), "BOUND".to_string())
+                }
+            };
+            for pid in socket.associated_pids {
+                socket_map
+                    .entry(pid)
+                    .or_default()
+                    .push((port, protocol.clone(), state.clone()));
+            }
+        }
+
+        let system = System::new_all();
+        let mut rows = Vec::new();
+        for (pid, process) in system.processes() {
+            let process_name = process.name().to_string_lossy().into_owned();
+            let executable = process
+                .exe()
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let matches = if let Some(selected_path) = selected_path.as_ref() {
+                process
+                    .exe()
+                    .map(normalize_process_path)
+                    .as_ref()
+                    .is_some_and(|path| path == selected_path)
+            } else {
+                process_name.to_lowercase().contains(&query)
+                    || executable.to_lowercase().contains(&query)
+            };
+            if !matches {
+                continue;
+            }
+
+            let mut sockets = socket_map.remove(&pid.as_u32()).unwrap_or_default();
+            sockets.sort_by_key(|item| item.0);
+            sockets.dedup();
+            let mut ports = sockets.iter().map(|item| item.0).collect::<Vec<_>>();
+            ports.sort_unstable();
+            ports.dedup();
+            let protocols = sockets
+                .iter()
+                .map(|item| item.1.as_str())
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>()
+                .join("/");
+            let states = sockets
+                .iter()
+                .map(|item| item.2.as_str())
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>()
+                .join("/");
+            rows.push(PortProcess {
+                port: ports.first().copied(),
+                ports,
+                protocol: protocols,
+                state: states,
+                pid: pid.as_u32(),
+                process_name,
+                executable,
+                command: process
+                    .cmd()
+                    .iter()
+                    .map(|part| part.to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                memory_bytes: process.memory(),
+            });
+        }
+        rows.sort_by(|left, right| {
+            left.process_name
+                .to_lowercase()
+                .cmp(&right.process_name.to_lowercase())
+                .then(left.pid.cmp(&right.pid))
+        });
+        Ok(rows)
+    })
+    .await
+    .map_err(|error| format!("Process search task failed: {error}"))?
+}
+
+fn normalize_process_path(path: &Path) -> String {
+    fs::canonicalize(path)
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .replace('\\', "/")
+        .to_lowercase()
 }
 
 #[tauri::command]
@@ -532,6 +940,76 @@ fn default_true() -> bool {
     true
 }
 
+fn default_system_widget_mode() -> String {
+    "floating".into()
+}
+
+fn default_system_widget_metrics() -> Vec<String> {
+    ["cpu", "memory", "temperature", "download", "upload"]
+        .into_iter()
+        .map(String::from)
+        .collect()
+}
+
+fn default_lan_device_id() -> String {
+    let machine = std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .unwrap_or_else(|_| "device".into());
+    let user = std::env::var("USERNAME")
+        .or_else(|_| std::env::var("USER"))
+        .unwrap_or_else(|_| "user".into());
+    let material = format!(
+        "{}\n{}\n{}",
+        machine,
+        user,
+        settings_file().to_string_lossy()
+    );
+    format!(
+        "td-{}",
+        &blake3::hash(material.as_bytes()).to_hex().to_string()[..16]
+    )
+}
+
+fn default_lan_device_name() -> String {
+    std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "ToolDock Device".into())
+}
+
+fn default_lan_password() -> String {
+    let entropy = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let seed = format!("{}\n{entropy}", default_lan_device_id());
+    let bytes = blake3::hash(seed.as_bytes());
+    let value = u32::from_le_bytes(bytes.as_bytes()[..4].try_into().unwrap()) % 1_000_000;
+    format!("{value:06}")
+}
+
+fn default_lan_receive_folder() -> PathBuf {
+    dirs::download_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("ToolDock")
+        .join("Received")
+}
+
+fn default_lan_receive_folder_string() -> String {
+    default_lan_receive_folder().to_string_lossy().into_owned()
+}
+
+fn lan_config(settings: &AppSettings) -> LanConfig {
+    LanConfig {
+        enabled: settings.lan_enabled,
+        device_id: settings.lan_device_id.clone(),
+        device_name: settings.lan_device_name.clone(),
+        password: settings.lan_password.clone(),
+        receive_dir: settings.lan_receive_dir.clone(),
+    }
+}
+
 fn default_language() -> String {
     "zh-CN".into()
 }
@@ -553,6 +1031,10 @@ fn default_font_scale() -> f64 {
     1.2
 }
 
+fn default_system_tray_metric() -> String {
+    "none".into()
+}
+
 fn settings_file() -> PathBuf {
     dirs::config_dir()
         .unwrap_or_else(std::env::temp_dir)
@@ -572,6 +1054,16 @@ fn default_settings() -> AppSettings {
         screenshot_shortcut: default_screenshot_shortcut(),
         recording_shortcut: default_recording_shortcut(),
         close_to_tray: true,
+        lan_enabled: true,
+        lan_device_id: default_lan_device_id(),
+        lan_device_name: default_lan_device_name(),
+        lan_password: default_lan_password(),
+        lan_receive_dir: default_lan_receive_folder_string(),
+        system_widget_enabled: false,
+        system_widget_always_on_top: true,
+        system_widget_mode: default_system_widget_mode(),
+        system_widget_metrics: default_system_widget_metrics(),
+        system_tray_metric: default_system_tray_metric(),
     }
 }
 
@@ -602,7 +1094,11 @@ fn load_settings() -> AppSettings {
 fn save_settings(
     mut settings: AppSettings,
     tray_menu: State<'_, TrayMenuState>,
+    lan_state: State<'_, LanState>,
+    system_state: State<'_, SystemMonitorState>,
+    app: tauri::AppHandle,
 ) -> Result<AppSettings, String> {
+    let previous_lan_config = lan_config(&read_settings());
     if settings.theme != "light" {
         settings.theme = "dark".into();
     }
@@ -637,6 +1133,36 @@ fn save_settings(
     if settings.recording_shortcut.trim().is_empty() {
         settings.recording_shortcut = default_recording_shortcut();
     }
+    if settings.lan_device_id.trim().is_empty() {
+        settings.lan_device_id = default_lan_device_id();
+    }
+    if settings.lan_device_name.trim().is_empty() {
+        settings.lan_device_name = default_lan_device_name();
+    }
+    if !settings.lan_password.is_empty() && settings.lan_password.chars().count() < 4 {
+        return Err("LAN connection password must be empty or at least 4 characters".into());
+    }
+    if settings.lan_receive_dir.trim().is_empty() {
+        settings.lan_receive_dir = default_lan_receive_folder_string();
+    }
+    if !matches!(
+        settings.system_tray_metric.as_str(),
+        "none" | "cpu" | "memory" | "network"
+    ) {
+        settings.system_tray_metric = default_system_tray_metric();
+    }
+    if !matches!(settings.system_widget_mode.as_str(), "floating" | "taskbar") {
+        settings.system_widget_mode = default_system_widget_mode();
+    }
+    let valid_widget_metrics = ["cpu", "memory", "temperature", "download", "upload"];
+    let mut seen_widget_metrics = HashSet::new();
+    settings.system_widget_metrics.retain(|metric| {
+        valid_widget_metrics.contains(&metric.as_str())
+            && seen_widget_metrics.insert(metric.clone())
+    });
+    if settings.system_widget_metrics.is_empty() {
+        settings.system_widget_metrics.push("cpu".into());
+    }
     let shortcuts = [
         &settings.color_shortcut,
         &settings.screenshot_shortcut,
@@ -649,7 +1175,15 @@ fn save_settings(
         .map_err(|error| format!("无法创建截图目录：{error}"))?;
     fs::create_dir_all(&settings.recording_dir)
         .map_err(|error| format!("无法创建录屏目录：{error}"))?;
+    if settings.lan_enabled {
+        fs::create_dir_all(&settings.lan_receive_dir)
+            .map_err(|error| format!("Unable to create LAN receive directory: {error}"))?;
+    }
     write_settings(&settings)?;
+    let next_lan_config = lan_config(&settings);
+    if next_lan_config != previous_lan_config {
+        lan_state.restart(app.clone(), next_lan_config)?;
+    }
     let (show_label, quit_label) = tray_labels(&settings.language);
     tray_menu
         .show_item
@@ -659,8 +1193,535 @@ fn save_settings(
         .quit_item
         .set_text(quit_label)
         .map_err(|error| format!("无法更新托盘菜单：{error}"))?;
+    *system_state
+        .tray_metric
+        .lock()
+        .map_err(|_| "System tray metric state is unavailable")? =
+        settings.system_tray_metric.clone();
+    let active_tray_metric = sync_taskbar_widget_state(&system_state, &settings)?;
+    let latest = system_state
+        .latest
+        .lock()
+        .map_err(|_| "System monitor state is unavailable")?
+        .clone();
+    update_system_tray(&app, &active_tray_metric, latest.as_ref())?;
+    if let Some(window) = app.get_webview_window("system-widget") {
+        window
+            .set_always_on_top(settings.system_widget_always_on_top)
+            .map_err(|error| format!("Unable to update the system widget: {error}"))?;
+        configure_system_widget(
+            &window,
+            &settings.system_widget_mode,
+            settings.system_widget_metrics.len(),
+        )?;
+        if settings.system_widget_enabled && settings.system_widget_mode == "floating" {
+            window
+                .show()
+                .map_err(|error| format!("Unable to show the system widget: {error}"))?;
+        } else {
+            window
+                .hide()
+                .map_err(|error| format!("Unable to hide the system widget: {error}"))?;
+        }
+        window
+            .eval("window.location.reload()")
+            .map_err(|error| format!("Unable to refresh the system widget: {error}"))?;
+    }
     Ok(settings)
 }
+
+#[tauri::command]
+fn system_metrics(state: State<'_, SystemMonitorState>) -> Result<SystemMetrics, String> {
+    state
+        .latest
+        .lock()
+        .map_err(|_| "System monitor state is unavailable".to_string())?
+        .clone()
+        .ok_or_else(|| "System metrics are still initializing".to_string())
+}
+
+fn ensure_system_widget(
+    app: &tauri::AppHandle,
+    always_on_top: bool,
+    metric_count: usize,
+) -> Result<tauri::WebviewWindow, String> {
+    if let Some(window) = app.get_webview_window("system-widget") {
+        window
+            .set_always_on_top(always_on_top)
+            .map_err(|error| format!("Unable to update the system widget: {error}"))?;
+        return Ok(window);
+    }
+
+    let builder = WebviewWindowBuilder::new(
+        app,
+        "system-widget",
+        WebviewUrl::App("index.html?view=system-widget".into()),
+    )
+    .title("ToolDock System Monitor")
+    .inner_size(floating_system_widget_width(metric_count) as f64, 44.0)
+    .resizable(false)
+    .decorations(false)
+    .always_on_top(always_on_top)
+    .skip_taskbar(true)
+    .visible(false);
+    #[cfg(target_os = "windows")]
+    let builder = builder.transparent(true).drag_and_drop(false);
+    builder
+        .build()
+        .map_err(|error| format!("Unable to create the system widget: {error}"))
+}
+
+fn position_system_widget(window: &tauri::WebviewWindow) -> Result<(), String> {
+    let monitor = window
+        .primary_monitor()
+        .map_err(|error| format!("Unable to locate the primary monitor: {error}"))?
+        .ok_or_else(|| "Unable to locate the primary monitor".to_string())?;
+    let work_area = monitor.work_area();
+    let size = window
+        .outer_size()
+        .map_err(|error| format!("Unable to read the system widget size: {error}"))?;
+    let x = work_area.position.x + work_area.size.width as i32 - size.width as i32 - 8;
+    let y = work_area.position.y + work_area.size.height as i32 - size.height as i32 - 8;
+    window
+        .set_position(PhysicalPosition::new(x, y))
+        .map_err(|error| format!("Unable to position the system widget: {error}"))
+}
+
+fn floating_system_widget_width(metric_count: usize) -> u32 {
+    const CHROME_WIDTH: u32 = 54;
+    const METRIC_WIDTH: u32 = 104;
+    CHROME_WIDTH + METRIC_WIDTH * metric_count.clamp(1, 5) as u32
+}
+
+fn configure_system_widget(
+    window: &tauri::WebviewWindow,
+    mode: &str,
+    metric_count: usize,
+) -> Result<(), String> {
+    if mode == "taskbar" {
+        window
+            .hide()
+            .map_err(|error| format!("Unable to hide the taskbar widget window: {error}"))?;
+        return Ok(());
+    }
+    window
+        .set_size(PhysicalSize::new(
+            floating_system_widget_width(metric_count),
+            44,
+        ))
+        .map_err(|error| format!("Unable to resize the floating widget: {error}"))?;
+    position_system_widget(window)
+}
+
+#[tauri::command]
+fn show_system_widget(app: tauri::AppHandle) -> Result<(), String> {
+    let mut settings = read_settings();
+    settings.system_widget_enabled = true;
+    write_settings(&settings)?;
+    let state = app.state::<SystemMonitorState>();
+    let active_tray_metric = sync_taskbar_widget_state(&state, &settings)?;
+    let latest = state
+        .latest
+        .lock()
+        .map_err(|_| "System monitor state is unavailable")?
+        .clone();
+    update_system_tray(&app, &active_tray_metric, latest.as_ref())?;
+    let window = ensure_system_widget(
+        &app,
+        settings.system_widget_always_on_top,
+        settings.system_widget_metrics.len(),
+    )?;
+    configure_system_widget(
+        &window,
+        &settings.system_widget_mode,
+        settings.system_widget_metrics.len(),
+    )?;
+    if settings.system_widget_mode == "floating" {
+        window
+            .show()
+            .map_err(|error| format!("Unable to show the system widget: {error}"))?;
+        window
+            .set_focus()
+            .map_err(|error| format!("Unable to focus the system widget: {error}"))?;
+    }
+    app.emit("system-widget-visibility", true)
+        .map_err(|error| format!("Unable to update the system widget state: {error}"))
+}
+
+#[tauri::command]
+fn hide_system_widget(app: tauri::AppHandle) -> Result<(), String> {
+    let mut settings = read_settings();
+    settings.system_widget_enabled = false;
+    write_settings(&settings)?;
+    let state = app.state::<SystemMonitorState>();
+    let active_tray_metric = sync_taskbar_widget_state(&state, &settings)?;
+    let latest = state
+        .latest
+        .lock()
+        .map_err(|_| "System monitor state is unavailable")?
+        .clone();
+    update_system_tray(&app, &active_tray_metric, latest.as_ref())?;
+    if let Some(window) = app.get_webview_window("system-widget") {
+        window
+            .hide()
+            .map_err(|error| format!("Unable to hide the system widget: {error}"))?;
+    }
+    app.emit("system-widget-visibility", false)
+        .map_err(|error| format!("Unable to update the system widget state: {error}"))
+}
+
+fn compact_tray_rate(bytes_per_second: f64) -> String {
+    let value = bytes_per_second.max(0.0);
+    if value < 1_000.0 {
+        format!("{:.0}", value.min(999.0))
+    } else if value < 100_000_000.0 {
+        let (scaled, suffix) = if value < 1_000_000.0 {
+            (value / 1_000.0, 'K')
+        } else {
+            (value / 1_000_000.0, 'M')
+        };
+        format!("{:.0}{suffix}", scaled.clamp(1.0, 99.0))
+    } else {
+        format!("{:.0}G", (value / 1_000_000_000.0).clamp(1.0, 99.0))
+    }
+}
+
+fn format_tray_rate(bytes_per_second: f64) -> String {
+    let value = bytes_per_second.max(0.0);
+    if value >= 1_000_000_000.0 {
+        format!("{:.1} GB", value / 1_000_000_000.0)
+    } else if value >= 1_000_000.0 {
+        format!("{:.1} MB", value / 1_000_000.0)
+    } else if value >= 1_000.0 {
+        format!("{:.1} KB", value / 1_000.0)
+    } else {
+        format!("{value:.0} B")
+    }
+}
+
+fn tray_glyph_rows(character: char) -> [u8; 5] {
+    match character {
+        '0' => [0b111, 0b101, 0b101, 0b101, 0b111],
+        '1' => [0b010, 0b110, 0b010, 0b010, 0b111],
+        '2' => [0b111, 0b001, 0b111, 0b100, 0b111],
+        '3' => [0b111, 0b001, 0b111, 0b001, 0b111],
+        '4' => [0b101, 0b101, 0b111, 0b001, 0b001],
+        '5' => [0b111, 0b100, 0b111, 0b001, 0b111],
+        '6' => [0b111, 0b100, 0b111, 0b101, 0b111],
+        '7' => [0b111, 0b001, 0b010, 0b010, 0b010],
+        '8' => [0b111, 0b101, 0b111, 0b101, 0b111],
+        '9' => [0b111, 0b101, 0b111, 0b001, 0b111],
+        'C' => [0b111, 0b100, 0b100, 0b100, 0b111],
+        'D' => [0b110, 0b101, 0b101, 0b101, 0b110],
+        'K' => [0b101, 0b110, 0b100, 0b110, 0b101],
+        'M' => [0b101, 0b111, 0b111, 0b101, 0b101],
+        'N' => [0b101, 0b111, 0b111, 0b111, 0b101],
+        'G' => [0b111, 0b100, 0b101, 0b101, 0b111],
+        'T' => [0b111, 0b010, 0b010, 0b010, 0b010],
+        'U' => [0b101, 0b101, 0b101, 0b101, 0b111],
+        '-' => [0b000, 0b000, 0b111, 0b000, 0b000],
+        _ => [0; 5],
+    }
+}
+
+fn draw_tray_text(rgba: &mut [u8], text: &str, y: usize, scale: usize, color: [u8; 4]) {
+    const SIZE: usize = 32;
+    let glyph_width = 3 * scale;
+    let spacing = scale;
+    let width = text
+        .chars()
+        .count()
+        .saturating_mul(glyph_width + spacing)
+        .saturating_sub(spacing);
+    let start_x = SIZE.saturating_sub(width) / 2;
+    for (index, character) in text.chars().enumerate() {
+        let rows = tray_glyph_rows(character);
+        let glyph_x = start_x + index * (glyph_width + spacing);
+        for (row, bits) in rows.into_iter().enumerate() {
+            for column in 0..3 {
+                if bits & (1 << (2 - column)) == 0 {
+                    continue;
+                }
+                for offset_y in 0..scale {
+                    for offset_x in 0..scale {
+                        let x = glyph_x + column * scale + offset_x;
+                        let pixel_y = y + row * scale + offset_y;
+                        if x >= SIZE || pixel_y >= SIZE {
+                            continue;
+                        }
+                        let offset = (pixel_y * SIZE + x) * 4;
+                        rgba[offset..offset + 4].copy_from_slice(&color);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn render_system_tray_icon(
+    metric: &str,
+    metrics: &SystemMetrics,
+) -> Option<tauri::image::Image<'static>> {
+    let (label, value, accent) = match metric {
+        "cpu" => (
+            "C",
+            format!("{:.0}", metrics.cpu_usage.clamp(0.0, 100.0)),
+            [43, 201, 112, 255],
+        ),
+        "memory" => (
+            "M",
+            format!("{:.0}", metrics.memory_usage.clamp(0.0, 100.0)),
+            [77, 151, 255, 255],
+        ),
+        "network" => (
+            "N",
+            compact_tray_rate(
+                metrics.network_download_bytes_per_second + metrics.network_upload_bytes_per_second,
+            ),
+            [35, 188, 210, 255],
+        ),
+        "temperature" => (
+            "T",
+            metrics
+                .cpu_temperature_c
+                .map(|value| format!("{value:.0}"))
+                .unwrap_or_else(|| "--".into()),
+            [245, 196, 81, 255],
+        ),
+        "download" => (
+            "D",
+            compact_tray_rate(metrics.network_download_bytes_per_second),
+            [35, 188, 210, 255],
+        ),
+        "upload" => (
+            "U",
+            compact_tray_rate(metrics.network_upload_bytes_per_second),
+            [255, 173, 66, 255],
+        ),
+        _ => return None,
+    };
+    let mut rgba = vec![0u8; 32 * 32 * 4];
+    for y in 0..32 {
+        for x in 0..32 {
+            let clipped_corner = (x < 3 || x >= 29) && (y < 3 || y >= 29) && (x % 29 + y % 29 < 2);
+            if clipped_corner {
+                continue;
+            }
+            let offset = (y * 32 + x) * 4;
+            let color = if y < 3 { accent } else { [24, 29, 36, 255] };
+            rgba[offset..offset + 4].copy_from_slice(&color);
+        }
+    }
+    draw_tray_text(&mut rgba, label, 5, 2, accent);
+    let scale = if value.chars().count() <= 2 { 3 } else { 2 };
+    let y = if scale == 3 { 16 } else { 18 };
+    draw_tray_text(&mut rgba, &value, y, scale, [245, 248, 250, 255]);
+    Some(tauri::image::Image::new_owned(rgba, 32, 32))
+}
+
+fn system_tray_tooltip(metrics: &SystemMetrics) -> String {
+    let temperature = metrics
+        .cpu_temperature_c
+        .map(|value| format!("{value:.0} C"))
+        .unwrap_or_else(|| "--".into());
+    let fan = metrics
+        .fan_rpm
+        .map(|value| format!("{value} RPM"))
+        .unwrap_or_else(|| "--".into());
+    format!(
+        "ToolDock | CPU {:.0}% | Memory {:.0}% | Temperature {} | Fan {} | Download {}/s | Upload {}/s",
+        metrics.cpu_usage,
+        metrics.memory_usage,
+        temperature,
+        fan,
+        format_tray_rate(metrics.network_download_bytes_per_second),
+        format_tray_rate(metrics.network_upload_bytes_per_second),
+    )
+}
+
+fn sync_taskbar_widget_state(
+    state: &SystemMonitorState,
+    settings: &AppSettings,
+) -> Result<String, String> {
+    let mut taskbar = state
+        .taskbar_widget
+        .lock()
+        .map_err(|_| "Taskbar widget state is unavailable")?;
+    let metrics_changed = taskbar.metrics != settings.system_widget_metrics;
+    taskbar.enabled = settings.system_widget_enabled && settings.system_widget_mode == "taskbar";
+    taskbar.metrics = settings.system_widget_metrics.clone();
+    if metrics_changed || taskbar.current_index >= taskbar.metrics.len() {
+        taskbar.current_index = 0;
+        taskbar.last_rotation = Instant::now();
+    }
+    if taskbar.enabled {
+        Ok(taskbar
+            .metrics
+            .get(taskbar.current_index)
+            .cloned()
+            .unwrap_or_else(|| "cpu".into()))
+    } else {
+        Ok(settings.system_tray_metric.clone())
+    }
+}
+
+fn current_system_tray_metric(state: &SystemMonitorState) -> String {
+    if let Ok(mut taskbar) = state.taskbar_widget.lock() {
+        if taskbar.enabled && !taskbar.metrics.is_empty() {
+            if taskbar.last_rotation.elapsed() >= Duration::from_millis(3500) {
+                taskbar.current_index = (taskbar.current_index + 1) % taskbar.metrics.len();
+                taskbar.last_rotation = Instant::now();
+            }
+            return taskbar.metrics[taskbar.current_index].clone();
+        }
+    }
+    state
+        .tray_metric
+        .lock()
+        .map(|value| value.clone())
+        .unwrap_or_else(|_| default_system_tray_metric())
+}
+
+fn update_system_tray(
+    app: &tauri::AppHandle,
+    metric: &str,
+    metrics: Option<&SystemMetrics>,
+) -> Result<(), String> {
+    let Some(tray) = app.tray_by_id("main") else {
+        return Ok(());
+    };
+    if metric == "none" {
+        tray.set_icon(app.default_window_icon().cloned())
+            .map_err(|error| format!("Unable to restore the ToolDock tray icon: {error}"))?;
+        tray.set_tooltip(Some("ToolDock"))
+            .map_err(|error| format!("Unable to update the ToolDock tray tooltip: {error}"))?;
+        return Ok(());
+    }
+    let Some(metrics) = metrics else {
+        return Ok(());
+    };
+    if let Some(icon) = render_system_tray_icon(metric, metrics) {
+        tray.set_icon(Some(icon))
+            .map_err(|error| format!("Unable to update the system tray metric: {error}"))?;
+    }
+    tray.set_tooltip(Some(system_tray_tooltip(metrics)))
+        .map_err(|error| format!("Unable to update the ToolDock tray tooltip: {error}"))
+}
+
+fn start_system_monitor(app: tauri::AppHandle) {
+    thread::spawn(move || {
+        let mut sampler = SystemSampler::default();
+        thread::sleep(Duration::from_millis(250));
+        loop {
+            let mut metrics = sampler.sample();
+            let state = app.state::<SystemMonitorState>();
+            if let Ok(hardware) = state.hardware.lock() {
+                metrics.cpu_temperature_c = hardware.cpu_temperature_c;
+                metrics.fan_rpm = hardware.fan_rpm;
+            }
+            if let Ok(mut latest) = state.latest.lock() {
+                *latest = Some(metrics.clone());
+            }
+            let tray_metric = current_system_tray_metric(&state);
+            let _ = update_system_tray(&app, &tray_metric, Some(&metrics));
+            let _ = app.emit("system-metrics", metrics);
+            thread::sleep(Duration::from_secs(1));
+        }
+    });
+}
+
+#[cfg(target_os = "windows")]
+fn find_hardware_monitor() -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(configured) = std::env::var("TOOLDOCK_HARDWARE_MONITOR") {
+        candidates.push(PathBuf::from(configured));
+    }
+    if let Ok(current_exe) = std::env::current_exe() {
+        if let Some(parent) = current_exe.parent() {
+            candidates.push(parent.join("tooldock-hardware-monitor.exe"));
+            candidates.push(
+                parent
+                    .join("resources")
+                    .join("tooldock-hardware-monitor.exe"),
+            );
+        }
+    }
+    candidates.push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("binaries")
+            .join("tooldock-hardware-monitor-x86_64-pc-windows-msvc.exe"),
+    );
+    candidates.into_iter().find(|path| path.is_file())
+}
+
+#[cfg(target_os = "windows")]
+fn start_hardware_sensor_monitor(app: tauri::AppHandle) {
+    let Some(path) = find_hardware_monitor() else {
+        eprintln!("ToolDock hardware monitor sidecar was not found; sensor values are unavailable");
+        return;
+    };
+    thread::spawn(move || loop {
+        let service_reading = std::env::var_os("PROGRAMDATA")
+            .map(PathBuf::from)
+            .map(|root| root.join("ToolDock").join("hardware-sensors.json"))
+            .and_then(|path| fs::read(path).ok())
+            .and_then(|bytes| serde_json::from_slice::<HardwareSensors>(&bytes).ok())
+            .filter(|reading| {
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                reading.timestamp_ms > 0 && now.saturating_sub(reading.timestamp_ms) < 10_000
+            });
+        if let Some(reading) = service_reading {
+            if let Ok(mut hardware) = app.state::<SystemMonitorState>().hardware.lock() {
+                *hardware = reading;
+            }
+            thread::sleep(Duration::from_secs(2));
+            continue;
+        }
+
+        let mut command = Command::new(&path);
+        command
+            .arg("--once")
+            .arg("--interval-ms")
+            .arg("2000")
+            .arg("--parent-pid")
+            .arg(std::process::id().to_string())
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        apply_no_window(&mut command);
+        match command.output() {
+            Ok(output) if output.status.success() => {
+                match serde_json::from_slice::<HardwareSensors>(&output.stdout) {
+                    Ok(reading) => {
+                        if let Ok(mut hardware) = app.state::<SystemMonitorState>().hardware.lock()
+                        {
+                            *hardware = reading;
+                        }
+                    }
+                    Err(error) => {
+                        eprintln!("Unable to parse ToolDock hardware sensor data: {error}");
+                    }
+                }
+            }
+            Ok(output) => {
+                eprintln!(
+                    "ToolDock hardware monitor exited with status {}",
+                    output.status
+                );
+            }
+            Err(error) => {
+                eprintln!("Unable to run the ToolDock hardware monitor: {error}");
+            }
+        }
+        thread::sleep(Duration::from_secs(10));
+    });
+}
+
+#[cfg(not(target_os = "windows"))]
+fn start_hardware_sensor_monitor(_app: tauri::AppHandle) {}
 
 #[tauri::command]
 async fn choose_directory(initial: Option<String>) -> Result<Option<String>, String> {
@@ -745,9 +1806,11 @@ fn selected_monitor(monitor_id: usize) -> Result<(Monitor, String), String> {
 
 #[tauri::command]
 async fn capture_screenshot(
+    app: tauri::AppHandle,
     monitor_id: usize,
     directory: Option<String>,
 ) -> Result<ScreenshotResult, String> {
+    hide_capture_windows_before_snapshot(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
         let (monitor, monitor_name) = selected_monitor(monitor_id)?;
         let image = capture_monitor_snapshot(&monitor)?;
@@ -932,75 +1995,9 @@ fn encode_color_picker_bmp(image: &RgbaImage) -> Result<Vec<u8>, String> {
 }
 
 fn encode_overlay_preview(image: &RgbaImage) -> Result<Vec<u8>, String> {
-    const MAX_PREVIEW_DIMENSION: u32 = 1920;
-    let max_dimension = image.width().max(image.height());
-    let (width, height) = if max_dimension > MAX_PREVIEW_DIMENSION {
-        let scale = MAX_PREVIEW_DIMENSION as f64 / max_dimension as f64;
-        (
-            (image.width() as f64 * scale).round().max(1.0) as u32,
-            (image.height() as f64 * scale).round().max(1.0) as u32,
-        )
-    } else {
-        (image.width(), image.height())
-    };
-    if width == image.width() && height == image.height() {
-        return encode_color_picker_bmp(image);
-    }
-
-    let pixel_bytes = (width as usize)
-        .checked_mul(height as usize)
-        .and_then(|pixels| pixels.checked_mul(4))
-        .ok_or_else(|| "区域选择屏幕快照过大".to_string())?;
-    let file_size = 54usize
-        .checked_add(pixel_bytes)
-        .ok_or_else(|| "区域选择屏幕快照过大".to_string())?;
-    let mut bytes = Vec::with_capacity(file_size);
-    bytes.extend_from_slice(b"BM");
-    bytes.extend_from_slice(
-        &u32::try_from(file_size)
-            .map_err(|_| "区域选择屏幕快照过大".to_string())?
-            .to_le_bytes(),
-    );
-    bytes.extend_from_slice(&[0; 4]);
-    bytes.extend_from_slice(&54u32.to_le_bytes());
-    bytes.extend_from_slice(&40u32.to_le_bytes());
-    bytes.extend_from_slice(
-        &i32::try_from(width)
-            .map_err(|_| "区域选择宽度过大".to_string())?
-            .to_le_bytes(),
-    );
-    bytes.extend_from_slice(
-        &(-i32::try_from(height).map_err(|_| "区域选择高度过大".to_string())?).to_le_bytes(),
-    );
-    bytes.extend_from_slice(&1u16.to_le_bytes());
-    bytes.extend_from_slice(&32u16.to_le_bytes());
-    bytes.extend_from_slice(&0u32.to_le_bytes());
-    bytes.extend_from_slice(
-        &u32::try_from(pixel_bytes)
-            .map_err(|_| "区域选择屏幕快照过大".to_string())?
-            .to_le_bytes(),
-    );
-    bytes.extend_from_slice(&[0; 16]);
-
-    let source = image.as_raw();
-    let source_width = image.width() as usize;
-    let source_x_offsets = (0..width)
-        .map(|output_x| (output_x as u64 * image.width() as u64 / width as u64) as usize * 4)
-        .collect::<Vec<_>>();
-    for output_y in 0..height {
-        let source_y = (output_y as u64 * image.height() as u64 / height as u64) as usize;
-        let row_offset = source_y * source_width * 4;
-        for source_x_offset in &source_x_offsets {
-            let index = row_offset + source_x_offset;
-            bytes.extend_from_slice(&[
-                source[index + 2],
-                source[index + 1],
-                source[index],
-                source[index + 3],
-            ]);
-        }
-    }
-    Ok(bytes)
+    // Keep one source pixel per physical display pixel. Downscaling this image
+    // makes the WebView enlarge it again on high-DPI and multi-monitor desktops.
+    encode_color_picker_bmp(image)
 }
 
 #[cfg(target_os = "windows")]
@@ -1088,20 +2085,22 @@ fn capture_monitor_area(x: i32, y: i32, width: u32, height: u32) -> Result<RgbaI
 
 #[cfg(target_os = "windows")]
 fn capture_monitor_snapshot(monitor: &Monitor) -> Result<RgbaImage, String> {
-    capture_monitor_area(
-        monitor
-            .x()
-            .map_err(|error| format!("无法读取显示器横坐标：{error}"))?,
-        monitor
-            .y()
-            .map_err(|error| format!("无法读取显示器纵坐标：{error}"))?,
-        monitor
-            .width()
-            .map_err(|error| format!("无法读取显示器宽度：{error}"))?,
-        monitor
-            .height()
-            .map_err(|error| format!("无法读取显示器高度：{error}"))?,
-    )
+    monitor.capture_image().or_else(|_| {
+        capture_monitor_area(
+            monitor
+                .x()
+                .map_err(|error| format!("无法读取显示器横坐标：{error}"))?,
+            monitor
+                .y()
+                .map_err(|error| format!("无法读取显示器纵坐标：{error}"))?,
+            monitor
+                .width()
+                .map_err(|error| format!("无法读取显示器宽度：{error}"))?,
+            monitor
+                .height()
+                .map_err(|error| format!("无法读取显示器高度：{error}"))?,
+        )
+    })
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -1114,77 +2113,108 @@ fn capture_monitor_snapshot(monitor: &Monitor) -> Result<RgbaImage, String> {
 fn capture_all_monitor_snapshots() -> Result<Vec<MonitorSnapshot>, String> {
     let monitors = Monitor::all().map_err(|error| format!("无法读取显示器：{error}"))?;
 
-    #[cfg(target_os = "windows")]
-    {
-        let descriptors = monitors
-            .into_iter()
-            .enumerate()
-            .map(|(monitor_id, monitor)| {
-                Ok::<_, String>((
-                    monitor_id,
-                    monitor.width().map_err(|error| error.to_string())?,
-                    monitor.height().map_err(|error| error.to_string())?,
-                    monitor.x().map_err(|error| error.to_string())?,
-                    monitor.y().map_err(|error| error.to_string())?,
-                    monitor.is_primary().unwrap_or(false),
-                    monitor
-                        .friendly_name()
-                        .unwrap_or_else(|_| format!("显示器 {}", monitor_id + 1)),
-                ))
+    monitors
+        .into_iter()
+        .enumerate()
+        .map(|(monitor_id, monitor)| {
+            Ok::<_, String>(MonitorSnapshot {
+                monitor_id,
+                image: capture_monitor_snapshot(&monitor)?,
+                width: monitor.width().map_err(|error| error.to_string())?,
+                height: monitor.height().map_err(|error| error.to_string())?,
+                origin_x: monitor.x().map_err(|error| error.to_string())?,
+                origin_y: monitor.y().map_err(|error| error.to_string())?,
+                is_primary: monitor.is_primary().unwrap_or(false),
+                monitor_name: monitor
+                    .friendly_name()
+                    .unwrap_or_else(|_| format!("显示器 {}", monitor_id + 1)),
             })
-            .collect::<Result<Vec<_>, String>>()?;
-        thread::scope(|scope| {
-            let handles = descriptors
-                .into_iter()
-                .map(
-                    |(monitor_id, width, height, origin_x, origin_y, is_primary, monitor_name)| {
-                        scope.spawn(move || {
-                            Ok::<_, String>(MonitorSnapshot {
-                                monitor_id,
-                                image: capture_monitor_area(origin_x, origin_y, width, height)?,
-                                width,
-                                height,
-                                origin_x,
-                                origin_y,
-                                is_primary,
-                                monitor_name,
-                            })
-                        })
-                    },
-                )
-                .collect::<Vec<_>>();
-            handles
-                .into_iter()
-                .map(|handle| {
-                    handle
-                        .join()
-                        .map_err(|_| "显示器快照线程异常退出".to_string())?
-                })
-                .collect::<Result<Vec<_>, String>>()
         })
+        .collect()
+}
+
+fn hide_capture_windows_before_snapshot(app: &tauri::AppHandle) -> Result<(), String> {
+    let windows = app
+        .webview_windows()
+        .into_iter()
+        .filter(|(label, _)| {
+            label == "main"
+                || label.starts_with("region-selector-")
+                || label.starts_with("color-picker-")
+        })
+        .map(|(_, window)| window)
+        .collect::<Vec<_>>();
+
+    for window in &windows {
+        window
+            .hide()
+            .map_err(|error| format!("无法在屏幕捕获前隐藏 ToolDock：{error}"))?;
     }
 
-    #[cfg(not(target_os = "windows"))]
-    {
-        monitors
-            .into_iter()
-            .enumerate()
-            .map(|(monitor_id, monitor)| {
-                Ok::<_, String>(MonitorSnapshot {
-                    monitor_id,
-                    image: capture_monitor_snapshot(&monitor)?,
-                    width: monitor.width().map_err(|error| error.to_string())?,
-                    height: monitor.height().map_err(|error| error.to_string())?,
-                    origin_x: monitor.x().map_err(|error| error.to_string())?,
-                    origin_y: monitor.y().map_err(|error| error.to_string())?,
-                    is_primary: monitor.is_primary().unwrap_or(false),
-                    monitor_name: monitor
-                        .friendly_name()
-                        .unwrap_or_else(|_| format!("显示器 {}", monitor_id + 1)),
-                })
-            })
-            .collect()
+    for _ in 0..20 {
+        let all_hidden = windows
+            .iter()
+            .all(|window| matches!(window.is_visible(), Ok(false)));
+        if all_hidden {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
     }
+
+    // Window visibility changes before the desktop compositor has necessarily
+    // published a frame without ToolDock. Give it a short, consistent grace period.
+    thread::sleep(Duration::from_millis(220));
+    Ok(())
+}
+
+fn compose_virtual_desktop_snapshot(
+    snapshots: Vec<MonitorSnapshot>,
+) -> Result<MonitorSnapshot, String> {
+    let min_x = snapshots
+        .iter()
+        .map(|snapshot| snapshot.origin_x)
+        .min()
+        .ok_or_else(|| "没有可供选择的显示器".to_string())?;
+    let min_y = snapshots
+        .iter()
+        .map(|snapshot| snapshot.origin_y)
+        .min()
+        .ok_or_else(|| "没有可供选择的显示器".to_string())?;
+    let max_x = snapshots
+        .iter()
+        .map(|snapshot| snapshot.origin_x as i64 + snapshot.width as i64)
+        .max()
+        .ok_or_else(|| "没有可供选择的显示器".to_string())?;
+    let max_y = snapshots
+        .iter()
+        .map(|snapshot| snapshot.origin_y as i64 + snapshot.height as i64)
+        .max()
+        .ok_or_else(|| "没有可供选择的显示器".to_string())?;
+    let width =
+        u32::try_from(max_x - min_x as i64).map_err(|_| "虚拟桌面宽度超出支持范围".to_string())?;
+    let height =
+        u32::try_from(max_y - min_y as i64).map_err(|_| "虚拟桌面高度超出支持范围".to_string())?;
+    let mut image = RgbaImage::new(width, height);
+
+    for snapshot in snapshots {
+        image::imageops::overlay(
+            &mut image,
+            &snapshot.image,
+            i64::from(snapshot.origin_x - min_x),
+            i64::from(snapshot.origin_y - min_y),
+        );
+    }
+
+    Ok(MonitorSnapshot {
+        monitor_id: 0,
+        image,
+        width,
+        height,
+        origin_x: min_x,
+        origin_y: min_y,
+        is_primary: true,
+        monitor_name: "All displays".into(),
+    })
 }
 
 fn close_region_selector_windows(app: &tauri::AppHandle) {
@@ -1217,6 +2247,7 @@ async fn open_region_selector(
         .lock()
         .map_err(|_| "区域快照状态不可用".to_string())?
         .clear();
+    hide_capture_windows_before_snapshot(&app)?;
 
     let cursor_position = app.cursor_position().ok();
     let token = format!(
@@ -1228,9 +2259,15 @@ async fn open_region_selector(
             .as_nanos()
     );
     let asset_token = token.clone();
+    let capture_purpose = purpose.clone();
     let (overlays, images, monitor_names, assets) =
         tauri::async_runtime::spawn_blocking(move || {
             let raw_captures = capture_all_monitor_snapshots()?;
+            let raw_captures = if capture_purpose == "screenshot" {
+                vec![compose_virtual_desktop_snapshot(raw_captures)?]
+            } else {
+                raw_captures
+            };
             let mut captures = thread::scope(|scope| {
                 let handles = raw_captures
                     .into_iter()
@@ -1351,7 +2388,7 @@ async fn open_region_selector(
                 let url = WebviewUrl::App(
                     format!("index.html?regionSelectorMonitor={}", overlay.monitor_id).into(),
                 );
-                WebviewWindowBuilder::new(&app, &label, url)
+                let builder = WebviewWindowBuilder::new(&app, &label, url)
                     .title("ToolDock Region Selector")
                     .decorations(false)
                     .always_on_top(true)
@@ -1360,7 +2397,10 @@ async fn open_region_selector(
                     .resizable(false)
                     .shadow(false)
                     .visible(false)
-                    .inner_size(overlay.width as f64, overlay.height as f64)
+                    .inner_size(overlay.width as f64, overlay.height as f64);
+                #[cfg(target_os = "windows")]
+                let builder = builder.drag_and_drop(false);
+                builder
                     .build()
                     .map_err(|error| format!("无法创建区域选择遮罩窗口：{error}"))?
             };
@@ -1530,6 +2570,7 @@ async fn open_color_picker(
         .lock()
         .map_err(|_| "取色器快照状态不可用".to_string())?
         .clear();
+    hide_capture_windows_before_snapshot(&app)?;
 
     let cursor_position = app.cursor_position().ok();
     let asset_token = format!(
@@ -1642,7 +2683,7 @@ async fn open_color_picker(
                 let url = WebviewUrl::App(
                     format!("index.html?pickerMonitor={}", overlay.monitor_id).into(),
                 );
-                WebviewWindowBuilder::new(&app, &label, url)
+                let builder = WebviewWindowBuilder::new(&app, &label, url)
                     .title("ToolDock Color Picker")
                     .decorations(false)
                     .always_on_top(true)
@@ -1650,7 +2691,10 @@ async fn open_color_picker(
                     .resizable(false)
                     .shadow(false)
                     .visible(false)
-                    .inner_size(overlay.width as f64, overlay.height as f64)
+                    .inner_size(overlay.width as f64, overlay.height as f64);
+                #[cfg(target_os = "windows")]
+                let builder = builder.drag_and_drop(false);
+                builder
                     .build()
                     .map_err(|error| format!("无法创建取色器遮罩窗口：{error}"))?
             };
@@ -1979,6 +3023,232 @@ fn list_audio_inputs() -> Result<Vec<AudioInputInfo>, String> {
 
     #[allow(unreachable_code)]
     Ok(Vec::new())
+}
+
+#[cfg(target_os = "windows")]
+struct WindowsSystemAudioCapture {
+    stop: Arc<AtomicBool>,
+    join: Option<JoinHandle<Result<(), String>>>,
+    path: PathBuf,
+}
+
+#[cfg(target_os = "windows")]
+impl WindowsSystemAudioCapture {
+    fn finish(mut self) -> Result<(), String> {
+        self.stop.store(true, Ordering::Release);
+        self.join
+            .take()
+            .ok_or_else(|| "System audio capture thread is unavailable".to_string())?
+            .join()
+            .map_err(|_| "System audio capture thread stopped unexpectedly".to_string())?
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for WindowsSystemAudioCapture {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn write_wasapi_samples(
+    writer: &mut hound::WavWriter<std::io::BufWriter<fs::File>>,
+    samples: &mut VecDeque<u8>,
+) -> Result<(), String> {
+    while samples.len() >= 4 {
+        let bytes = [
+            samples.pop_front().unwrap_or_default(),
+            samples.pop_front().unwrap_or_default(),
+            samples.pop_front().unwrap_or_default(),
+            samples.pop_front().unwrap_or_default(),
+        ];
+        writer
+            .write_sample(f32::from_le_bytes(bytes))
+            .map_err(|error| format!("Unable to write system audio samples: {error}"))?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn run_windows_system_audio_capture(
+    path: PathBuf,
+    stop: Arc<AtomicBool>,
+    ready: SyncSender<Result<(), String>>,
+) -> Result<(), String> {
+    let result = (|| {
+        wasapi::initialize_mta()
+            .ok()
+            .map_err(|error| format!("Unable to initialize Windows audio capture: {error}"))?;
+        let enumerator = wasapi::DeviceEnumerator::new()
+            .map_err(|error| format!("Unable to enumerate Windows audio devices: {error}"))?;
+        let device = enumerator
+            .get_default_device(&wasapi::Direction::Render)
+            .map_err(|error| {
+                format!("Unable to open the default Windows output device: {error}")
+            })?;
+        let mut audio_client = device
+            .get_iaudioclient()
+            .map_err(|error| format!("Unable to create the Windows audio client: {error}"))?;
+        let format = wasapi::WaveFormat::new(32, 32, &wasapi::SampleType::Float, 48_000, 2, None);
+        let (_, minimum_period) = audio_client
+            .get_device_period()
+            .map_err(|error| format!("Unable to read the Windows audio period: {error}"))?;
+        let mode = wasapi::StreamMode::EventsShared {
+            autoconvert: true,
+            buffer_duration_hns: minimum_period,
+        };
+        audio_client
+            .initialize_client(&format, &wasapi::Direction::Capture, &mode)
+            .map_err(|error| {
+                format!("Unable to initialize Windows system audio loopback: {error}")
+            })?;
+        let event = audio_client
+            .set_get_eventhandle()
+            .map_err(|error| format!("Unable to create the Windows audio event: {error}"))?;
+        let capture_client = audio_client.get_audiocaptureclient().map_err(|error| {
+            format!("Unable to create the Windows audio capture client: {error}")
+        })?;
+        let specification = hound::WavSpec {
+            channels: 2,
+            sample_rate: 48_000,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        };
+        let mut writer = hound::WavWriter::create(&path, specification)
+            .map_err(|error| format!("Unable to create the system audio file: {error}"))?;
+        let mut samples = VecDeque::with_capacity(48_000 * 2 * 4);
+
+        audio_client
+            .start_stream()
+            .map_err(|error| format!("Unable to start Windows system audio capture: {error}"))?;
+        let _ = ready.send(Ok(()));
+
+        while !stop.load(Ordering::Acquire) {
+            if event.wait_for_event(100).is_ok() {
+                capture_client
+                    .read_from_device_to_deque(&mut samples)
+                    .map_err(|error| format!("Unable to capture Windows system audio: {error}"))?;
+                write_wasapi_samples(&mut writer, &mut samples)?;
+            }
+        }
+
+        let _ = audio_client.stop_stream();
+        write_wasapi_samples(&mut writer, &mut samples)?;
+        writer
+            .finalize()
+            .map_err(|error| format!("Unable to finalize the system audio file: {error}"))
+    })();
+
+    if let Err(error) = &result {
+        let _ = ready.send(Err(error.clone()));
+    }
+    result
+}
+
+#[cfg(target_os = "windows")]
+fn start_windows_system_audio(path: PathBuf) -> Result<WindowsSystemAudioCapture, String> {
+    let stop = Arc::new(AtomicBool::new(false));
+    let thread_stop = stop.clone();
+    let thread_path = path.clone();
+    let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+    let join = thread::Builder::new()
+        .name("tooldock-system-audio".into())
+        .spawn(move || run_windows_system_audio_capture(thread_path, thread_stop, ready_tx))
+        .map_err(|error| format!("Unable to start the system audio thread: {error}"))?;
+    let capture = WindowsSystemAudioCapture {
+        stop,
+        join: Some(join),
+        path,
+    };
+    match ready_rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(Ok(())) => Ok(capture),
+        Ok(Err(error)) => Err(error),
+        Err(_) => Err("Timed out while starting Windows system audio capture".into()),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn mux_windows_system_audio(
+    ffmpeg: &Path,
+    video_path: &Path,
+    audio_path: &Path,
+    output_path: &Path,
+) -> Result<(), String> {
+    let mut command = Command::new(ffmpeg);
+    command
+        .args(["-y", "-hide_banner", "-loglevel", "error", "-i"])
+        .arg(video_path)
+        .arg("-i")
+        .arg(audio_path)
+        .args([
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0",
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-shortest",
+            "-movflags",
+            "+faststart",
+        ])
+        .arg(output_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    apply_no_window(&mut command);
+    let output = command
+        .output()
+        .map_err(|error| format!("Unable to start FFmpeg audio muxing: {error}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let message = String::from_utf8_lossy(&output.stderr);
+        Err(format!(
+            "Unable to add system audio to the recording: {}",
+            message.trim()
+        ))
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn wrap_windows_system_audio(
+    ffmpeg: PathBuf,
+    final_path: PathBuf,
+    video_path: PathBuf,
+    video_join: JoinHandle<Result<RecordingResult, String>>,
+    audio_capture: WindowsSystemAudioCapture,
+) -> JoinHandle<Result<RecordingResult, String>> {
+    thread::spawn(move || {
+        let video_result = video_join
+            .join()
+            .map_err(|_| "Windows video capture thread stopped unexpectedly".to_string());
+        let audio_path = audio_capture.path.clone();
+        let audio_result = audio_capture.finish();
+        let video_result = video_result??;
+        audio_result?;
+        mux_windows_system_audio(&ffmpeg, &video_path, &audio_path, &final_path)?;
+
+        let temporary_preview = video_path.with_extension("preview.jpg");
+        let preview = fs::read(&temporary_preview).ok();
+        let result = finish_recording_result(final_path, video_result.duration_seconds, preview)?;
+        for temporary_path in [
+            video_path.clone(),
+            video_path.with_extension("json"),
+            temporary_preview,
+            audio_path,
+        ] {
+            let _ = fs::remove_file(temporary_path);
+        }
+        Ok(result)
+    })
 }
 
 fn spawn_ffmpeg(
@@ -2415,6 +3685,172 @@ fn encode_windows_native_recording(
 }
 
 #[cfg(target_os = "windows")]
+struct WindowsGpuRecordingFlags {
+    app: tauri::AppHandle,
+    path: PathBuf,
+    width: u32,
+    height: u32,
+    fps: u32,
+    bitrate_kbps: u32,
+    last_preview_jpeg: Arc<Mutex<Option<Vec<u8>>>>,
+}
+
+#[cfg(target_os = "windows")]
+struct WindowsGpuRecordingHandler {
+    app: tauri::AppHandle,
+    encoder: Option<VideoEncoder>,
+    next_preview_at: Instant,
+    packed_buffer: Vec<u8>,
+    last_preview_jpeg: Arc<Mutex<Option<Vec<u8>>>>,
+}
+
+#[cfg(target_os = "windows")]
+impl GraphicsCaptureApiHandler for WindowsGpuRecordingHandler {
+    type Flags = WindowsGpuRecordingFlags;
+    type Error = String;
+
+    fn new(context: WindowsCaptureContext<Self::Flags>) -> Result<Self, Self::Error> {
+        let flags = context.flags;
+        let encoder = VideoEncoder::new(
+            VideoSettingsBuilder::new(flags.width, flags.height)
+                .sub_type(VideoSettingsSubType::H264)
+                .bitrate(flags.bitrate_kbps.saturating_mul(1_000))
+                .frame_rate(flags.fps),
+            AudioSettingsBuilder::default().disabled(true),
+            ContainerSettingsBuilder::default(),
+            flags.path,
+        )
+        .map_err(|error| format!("Unable to initialize the Windows video encoder: {error}"))?;
+        Ok(Self {
+            app: flags.app,
+            encoder: Some(encoder),
+            next_preview_at: Instant::now(),
+            packed_buffer: Vec::new(),
+            last_preview_jpeg: flags.last_preview_jpeg,
+        })
+    }
+
+    fn on_frame_arrived(
+        &mut self,
+        frame: &mut WindowsCaptureFrame,
+        _capture_control: InternalCaptureControl,
+    ) -> Result<(), Self::Error> {
+        self.encoder
+            .as_mut()
+            .ok_or_else(|| "Windows video encoder is unavailable".to_string())?
+            .send_frame(frame)
+            .map_err(|error| format!("Unable to encode a Windows capture frame: {error}"))?;
+
+        let now = Instant::now();
+        if now >= self.next_preview_at {
+            let width = frame.width();
+            let height = frame.height();
+            let buffer = frame
+                .buffer()
+                .map_err(|error| format!("Unable to read a Windows preview frame: {error}"))?;
+            let pixels = buffer.as_nopadding_buffer(&mut self.packed_buffer);
+            if let Ok((preview, jpeg)) = encode_recording_preview(width, height, pixels) {
+                let _ = self.app.emit("recording-preview", preview);
+                if let Ok(mut latest) = self.last_preview_jpeg.lock() {
+                    *latest = Some(jpeg);
+                }
+            }
+            self.next_preview_at = now + Duration::from_millis(250);
+        }
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for WindowsGpuRecordingHandler {
+    fn drop(&mut self) {
+        if let Some(encoder) = self.encoder.take() {
+            if let Err(error) = encoder.finish() {
+                eprintln!("Unable to finalize the Windows video encoder: {error}");
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+type WindowsGpuCaptureControl = CaptureControl<WindowsGpuRecordingHandler, String>;
+
+#[cfg(target_os = "windows")]
+fn start_windows_gpu_capture(
+    source: &RecordingSourceConfig,
+    flags: WindowsGpuRecordingFlags,
+) -> Result<WindowsGpuCaptureControl, String> {
+    let interval =
+        MinimumUpdateIntervalSettings::Custom(Duration::from_secs_f64(1.0 / flags.fps as f64));
+    match source {
+        RecordingSourceConfig::Monitor { monitor_id } => {
+            let monitor = WindowsCaptureMonitor::from_index(monitor_id + 1)
+                .map_err(|error| format!("Unable to select the Windows monitor: {error}"))?;
+            let settings = WindowsCaptureSettings::new(
+                monitor,
+                CursorCaptureSettings::Default,
+                DrawBorderSettings::WithoutBorder,
+                SecondaryWindowSettings::Default,
+                interval,
+                DirtyRegionSettings::Default,
+                WindowsCaptureColorFormat::Rgba8,
+                flags,
+            );
+            WindowsGpuRecordingHandler::start_free_threaded(settings)
+                .map_err(|error| format!("Unable to start GPU screen capture: {error}"))
+        }
+        RecordingSourceConfig::Window { window_id } => {
+            let window =
+                WindowsCaptureWindow::from_raw_hwnd(*window_id as usize as *mut std::ffi::c_void);
+            let settings = WindowsCaptureSettings::new(
+                window,
+                CursorCaptureSettings::Default,
+                DrawBorderSettings::WithoutBorder,
+                SecondaryWindowSettings::Exclude,
+                interval,
+                DirtyRegionSettings::Default,
+                WindowsCaptureColorFormat::Rgba8,
+                flags,
+            );
+            WindowsGpuRecordingHandler::start_free_threaded(settings)
+                .map_err(|error| format!("Unable to start GPU window capture: {error}"))
+        }
+        RecordingSourceConfig::Region { .. } => {
+            Err("GPU recording does not support cropped regions yet".into())
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn encode_windows_gpu_recording(
+    capture_control: WindowsGpuCaptureControl,
+    stop_rx: Receiver<()>,
+    last_preview_jpeg: Arc<Mutex<Option<Vec<u8>>>>,
+    path: PathBuf,
+    started: Instant,
+) -> Result<RecordingResult, String> {
+    loop {
+        match stop_rx.recv_timeout(Duration::from_millis(50)) {
+            Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if capture_control.is_finished() {
+                    break;
+                }
+            }
+        }
+    }
+
+    capture_control
+        .stop()
+        .map_err(|error| format!("Windows GPU capture stopped with an error: {error}"))?;
+    let preview = last_preview_jpeg
+        .lock()
+        .ok()
+        .and_then(|value| value.clone());
+    finish_recording_result(path, started.elapsed().as_secs(), preview)
+}
+
+#[cfg(target_os = "windows")]
 struct WindowsWindowFrameHandler {
     sender: SyncSender<RgbaImage>,
     packed_buffer: Vec<u8>,
@@ -2491,7 +3927,7 @@ fn prepare_windows_recording(
         height,
         fps,
         bitrate_kbps,
-        audio_enabled,
+        audio_source,
         audio_input_id,
         output_directory,
     } = config;
@@ -2500,9 +3936,101 @@ fn prepare_windows_recording(
         "ToolDock-{}.mp4",
         Local::now().format("%Y%m%d-%H%M%S")
     ));
+    let system_audio_enabled = audio_source == RecordingAudioSource::System;
+    let microphone_enabled = audio_source == RecordingAudioSource::Microphone;
+    let video_path = if system_audio_enabled {
+        path.with_extension("video.mp4")
+    } else {
+        path.clone()
+    };
+    let mut system_audio = if system_audio_enabled {
+        Some(start_windows_system_audio(
+            path.with_extension("audio.wav"),
+        )?)
+    } else {
+        None
+    };
     let (stop_tx, stop_rx) = mpsc::channel();
     let started = Instant::now();
-    let thread_path = path.clone();
+    let thread_path = video_path.clone();
+
+    let native_dimensions = match &source {
+        RecordingSourceConfig::Monitor { monitor_id } => {
+            let (monitor, _) = selected_monitor(*monitor_id)?;
+            let input_width = monitor
+                .width()
+                .map_err(|error| format!("Unable to read the monitor width: {error}"))?;
+            let input_height = monitor
+                .height()
+                .map_err(|error| format!("Unable to read the monitor height: {error}"))?;
+            Some((input_width, input_height))
+        }
+        RecordingSourceConfig::Window { window_id } => {
+            let image = selected_window(*window_id)?
+                .capture_image()
+                .map_err(|error| format!("Unable to capture the selected application: {error}"))?;
+            Some(image.dimensions())
+        }
+        RecordingSourceConfig::Region { .. } => None,
+    };
+    if let Some((input_width, input_height)) = native_dimensions {
+        if input_width < 2 || input_height < 2 {
+            return Err("The selected recording source has an invalid size".into());
+        }
+        let requested_width = width.unwrap_or(input_width).max(2);
+        let requested_height = height.unwrap_or(input_height).max(2);
+        let output_width = requested_width.saturating_sub(requested_width % 2);
+        let output_height = requested_height.saturating_sub(requested_height % 2);
+        if !microphone_enabled && output_width == input_width && output_height == input_height {
+            let last_preview_jpeg = Arc::new(Mutex::new(None));
+            let capture_control = start_windows_gpu_capture(
+                &source,
+                WindowsGpuRecordingFlags {
+                    app: app.clone(),
+                    path: video_path.clone(),
+                    width: input_width,
+                    height: input_height,
+                    fps,
+                    bitrate_kbps,
+                    last_preview_jpeg: last_preview_jpeg.clone(),
+                },
+            )?;
+            let video_join = thread::spawn(move || {
+                encode_windows_gpu_recording(
+                    capture_control,
+                    stop_rx,
+                    last_preview_jpeg,
+                    thread_path,
+                    started,
+                )
+            });
+            let join = match system_audio.take() {
+                Some(audio_capture) => wrap_windows_system_audio(
+                    ffmpeg,
+                    path.clone(),
+                    video_path,
+                    video_join,
+                    audio_capture,
+                ),
+                None => video_join,
+            };
+            let path_string = path.to_string_lossy().into_owned();
+            return Ok((
+                RecordingSession {
+                    stop_tx,
+                    join,
+                    path: path_string.clone(),
+                    started,
+                },
+                RecordingStatus {
+                    active: true,
+                    path: Some(path_string),
+                    elapsed_seconds: 0,
+                },
+            ));
+        }
+    }
+
     let join = match source {
         RecordingSourceConfig::Window { window_id } => {
             let window = selected_window(window_id)?;
@@ -2526,9 +4054,9 @@ fn prepare_windows_recording(
                 output_height,
                 fps,
                 bitrate_kbps,
-                audio_enabled,
+                microphone_enabled,
                 audio_input_id.as_deref(),
-                &path,
+                &video_path,
             ) {
                 Ok(process) => process,
                 Err(error) => {
@@ -2571,11 +4099,11 @@ fn prepare_windows_recording(
                 output_height,
                 fps,
                 bitrate_kbps,
-                audio_enabled,
+                microphone_enabled,
                 audio_input_id.as_deref(),
                 preview_width,
                 preview_height,
-                &path,
+                &video_path,
             )?;
             thread::spawn(move || {
                 encode_windows_native_recording(
@@ -2592,6 +4120,12 @@ fn prepare_windows_recording(
                 )
             })
         }
+    };
+    let join = match system_audio.take() {
+        Some(audio_capture) => {
+            wrap_windows_system_audio(ffmpeg, path.clone(), video_path, join, audio_capture)
+        }
+        None => join,
     };
     let path_string = path.to_string_lossy().into_owned();
     Ok((
@@ -3256,6 +4790,26 @@ fn prepare_monitor_recording_input(
     ))
 }
 
+#[tauri::command]
+async fn choose_files() -> Result<Vec<String>, String> {
+    Ok(rfd::AsyncFileDialog::new()
+        .pick_files()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|file| file.path().to_string_lossy().into_owned())
+        .collect())
+}
+
+#[tauri::command]
+async fn choose_executable() -> Result<Option<String>, String> {
+    Ok(rfd::AsyncFileDialog::new()
+        .add_filter("Executable", &["exe", "bin", "app"])
+        .pick_file()
+        .await
+        .map(|file| file.path().to_string_lossy().into_owned()))
+}
+
 #[cfg(target_os = "macos")]
 fn prepare_monitor_recording_input(
     monitor_id: usize,
@@ -3309,6 +4863,10 @@ fn prepare_recording(
 
     #[cfg(not(target_os = "windows"))]
     {
+        if config.audio_source == RecordingAudioSource::System {
+            return Err("System audio recording is currently available on Windows only".into());
+        }
+        let microphone_enabled = config.audio_source == RecordingAudioSource::Microphone;
         let (input, input_width, input_height) = match config.source {
             RecordingSourceConfig::Monitor { monitor_id } => {
                 prepare_monitor_recording_input(monitor_id, None)?
@@ -3353,7 +4911,7 @@ fn prepare_recording(
             output_height,
             config.fps,
             config.bitrate_kbps,
-            config.audio_enabled,
+            microphone_enabled,
             config.audio_input_id.as_deref(),
             &path,
         ) {
@@ -3503,17 +5061,57 @@ async fn stop_recording(state: State<'_, RecordingState>) -> Result<RecordingRes
     .map_err(|error| format!("停止录屏任务失败：{error}"))?
 }
 
+fn create_main_window(app: &tauri::AppHandle) -> Result<tauri::WebviewWindow, String> {
+    let builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+        .title("ToolDock")
+        .inner_size(1180.0, 760.0)
+        .min_inner_size(980.0, 680.0)
+        .resizable(true)
+        .center()
+        .visible(true);
+    #[cfg(target_os = "windows")]
+    let builder = builder.drag_and_drop(false);
+    builder
+        .build()
+        .map_err(|error| format!("Unable to create the main window: {error}"))
+}
+
 fn show_main_window_handle(app: &tauri::AppHandle) -> Result<(), String> {
-    let window = app
-        .get_webview_window("main")
-        .ok_or_else(|| "主窗口不存在".to_string())?;
+    let window = match app.get_webview_window("main") {
+        Some(window) => window,
+        None => create_main_window(app)?,
+    };
+    window
+        .unminimize()
+        .map_err(|error| format!("Unable to restore the main window: {error}"))?;
     window
         .show()
-        .map_err(|error| format!("无法显示主窗口：{error}"))?;
-    let _ = window.unminimize();
+        .map_err(|error| format!("Unable to show the main window: {error}"))?;
     window
         .set_focus()
-        .map_err(|error| format!("无法聚焦主窗口：{error}"))
+        .map_err(|error| format!("Unable to focus the main window: {error}"))
+}
+
+fn request_show_main_window(app: &tauri::AppHandle) {
+    if app.get_webview_window("main").is_none() {
+        let app = app.clone();
+        thread::spawn(move || {
+            if let Err(error) = show_main_window_handle(&app) {
+                eprintln!("Unable to recreate ToolDock: {error}");
+            }
+        });
+        return;
+    }
+
+    let app = app.clone();
+    let dispatch = app.clone();
+    if let Err(error) = dispatch.run_on_main_thread(move || {
+        if let Err(error) = show_main_window_handle(&app) {
+            eprintln!("Unable to restore ToolDock: {error}");
+        }
+    }) {
+        eprintln!("Unable to schedule ToolDock restore: {error}");
+    }
 }
 
 #[tauri::command]
@@ -3588,6 +5186,9 @@ pub fn run() {
                     .expect("valid snapshot error response"),
             }
         })
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            request_show_main_window(app);
+        }))
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
         .manage(CaptureState::default())
@@ -3596,8 +5197,23 @@ pub fn run() {
         .manage(RegionSelectorState::default())
         .manage(RecordingState::default())
         .manage(FileClipboardState::default())
+        .manage(LanState::default())
+        .manage(SystemMonitorState::default())
         .setup(|app| {
+            create_main_window(app.handle()).map_err(std::io::Error::other)?;
+
             let settings = read_settings();
+            if let Ok(mut metric) = app.state::<SystemMonitorState>().tray_metric.lock() {
+                *metric = settings.system_tray_metric.clone();
+            }
+            sync_taskbar_widget_state(&app.state::<SystemMonitorState>(), &settings)
+                .map_err(std::io::Error::other)?;
+            if let Err(error) = app
+                .state::<LanState>()
+                .restart(app.handle().clone(), lan_config(&settings))
+            {
+                eprintln!("Unable to start the LAN service: {error}");
+            }
             let (show_label, quit_label) = tray_labels(&settings.language);
             let show_item = MenuItem::with_id(app, "show", show_label, true, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "quit", quit_label, true, None::<&str>)?;
@@ -3606,13 +5222,13 @@ pub fn run() {
                 show_item,
                 quit_item,
             });
-            let mut tray = TrayIconBuilder::new()
+            let mut tray = TrayIconBuilder::with_id("main")
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .tooltip("ToolDock")
                 .on_menu_event(|app, event| match event.id().as_ref() {
                     "show" => {
-                        let _ = show_main_window_handle(app);
+                        request_show_main_window(app);
                     }
                     "quit" => app.exit(0),
                     _ => {}
@@ -3626,32 +5242,58 @@ pub fn run() {
                             ..
                         }
                     ) {
-                        let _ = show_main_window_handle(tray.app_handle());
+                        request_show_main_window(tray.app_handle());
                     }
                 });
             if let Some(icon) = app.default_window_icon() {
                 tray = tray.icon(icon.clone());
             }
             tray.build(app)?;
+            let active_tray_metric = current_system_tray_metric(&app.state::<SystemMonitorState>());
+            update_system_tray(app.handle(), &active_tray_metric, None)
+                .map_err(std::io::Error::other)?;
+            let widget = ensure_system_widget(
+                app.handle(),
+                settings.system_widget_always_on_top,
+                settings.system_widget_metrics.len(),
+            )
+            .map_err(std::io::Error::other)?;
+            configure_system_widget(
+                &widget,
+                &settings.system_widget_mode,
+                settings.system_widget_metrics.len(),
+            )
+            .map_err(std::io::Error::other)?;
+            if settings.system_widget_enabled && settings.system_widget_mode == "floating" {
+                widget.show().map_err(std::io::Error::other)?;
+            }
+            start_hardware_sensor_monitor(app.handle().clone());
+            start_system_monitor(app.handle().clone());
             Ok(())
         })
         .on_window_event(|window, event| {
-            if window.label() == "main" {
-                if let WindowEvent::CloseRequested { api, .. } = event {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main" {
                     if read_settings().close_to_tray {
                         api.prevent_close();
                         let _ = window.hide();
                     }
+                } else if window.label() == "system-widget" {
+                    api.prevent_close();
+                    let _ = window.hide();
                 }
             }
         })
         .invoke_handler(tauri::generate_handler![
             inspect_ports,
+            inspect_processes,
             kill_processes,
             list_monitors,
             load_settings,
             save_settings,
             choose_directory,
+            choose_files,
+            choose_executable,
             capture_screenshot,
             finish_region_capture,
             list_screenshot_history,
@@ -3669,7 +5311,19 @@ pub fn run() {
             recording_status,
             stop_recording,
             copy_file_to_clipboard,
-            show_main_window
+            show_main_window,
+            lan_status,
+            list_lan_devices,
+            connect_lan_device,
+            disconnect_lan_device,
+            send_lan_files,
+            list_lan_transfers,
+            read_lan_clipboard,
+            send_lan_clipboard,
+            list_lan_clipboard_history,
+            system_metrics,
+            show_system_widget,
+            hide_system_widget
         ])
         .run(tauri::generate_context!())
         .expect("error while running ToolDock");
@@ -3677,15 +5331,50 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "windows")]
+    use super::{calculate_process_cpu_usage, ProcessCpuKey};
     use super::{
         default_settings, encode_color_picker_bmp, encode_overlay_preview,
-        encode_recording_preview, RecordingConfig, RecordingSourceConfig,
+        encode_recording_preview, floating_system_widget_width, render_system_tray_icon,
+        RecordingConfig, RecordingSourceConfig, SystemMetrics,
     };
+    #[cfg(target_os = "windows")]
+    use std::{collections::HashMap, time::Duration};
     use xcap::image::{Rgba, RgbaImage};
 
     #[test]
     fn first_launch_defaults_to_light_theme() {
         assert_eq!(default_settings().theme, "light");
+    }
+
+    #[test]
+    fn floating_widget_width_tracks_selected_metric_count() {
+        assert_eq!(floating_system_widget_width(1), 158);
+        assert_eq!(floating_system_widget_width(2), 262);
+        assert_eq!(floating_system_widget_width(5), 574);
+        assert!(floating_system_widget_width(1) < floating_system_widget_width(5));
+    }
+
+    #[test]
+    fn taskbar_icon_supports_every_widget_metric() {
+        let metrics = SystemMetrics {
+            cpu_usage: 25.0,
+            memory_used_bytes: 8,
+            memory_total_bytes: 16,
+            memory_usage: 50.0,
+            cpu_temperature_c: Some(72.0),
+            fan_rpm: Some(1200),
+            network_download_bytes_per_second: 125_000.0,
+            network_upload_bytes_per_second: 64_000.0,
+            timestamp_ms: 1,
+        };
+
+        for metric in ["cpu", "memory", "temperature", "download", "upload"] {
+            assert!(
+                render_system_tray_icon(metric, &metrics).is_some(),
+                "missing tray renderer for {metric}"
+            );
+        }
     }
 
     #[test]
@@ -3732,11 +5421,87 @@ mod tests {
     }
 
     #[test]
-    fn region_preview_limits_its_largest_dimension() {
+    fn region_preview_preserves_native_resolution() {
         let image = RgbaImage::from_pixel(2000, 1000, Rgba([10, 20, 30, 255]));
         let bmp = encode_overlay_preview(&image).expect("region preview should encode");
 
-        assert_eq!(i32::from_le_bytes(bmp[18..22].try_into().unwrap()), 1920);
-        assert_eq!(i32::from_le_bytes(bmp[22..26].try_into().unwrap()), -960);
+        assert_eq!(i32::from_le_bytes(bmp[18..22].try_into().unwrap()), 2000);
+        assert_eq!(i32::from_le_bytes(bmp[22..26].try_into().unwrap()), -1000);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn process_cpu_usage_matches_total_available_cpu_time() {
+        let first = ProcessCpuKey {
+            pid: 10,
+            start_time: 100,
+        };
+        let second = ProcessCpuKey {
+            pid: 20,
+            start_time: 200,
+        };
+        let previous = HashMap::from([(first, 1_000), (second, 500)]);
+        let current = HashMap::from([(first, 1_400), (second, 900)]);
+
+        let usage = calculate_process_cpu_usage(&previous, &current, Duration::from_secs(1), 1);
+
+        assert!((usage - 80.0).abs() < 0.01);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn process_cpu_usage_ignores_new_process_history() {
+        let existing = ProcessCpuKey {
+            pid: 10,
+            start_time: 100,
+        };
+        let new_process = ProcessCpuKey {
+            pid: 20,
+            start_time: 200,
+        };
+        let previous = HashMap::from([(existing, 1_000)]);
+        let current = HashMap::from([(existing, 1_200), (new_process, 10_000)]);
+
+        let usage = calculate_process_cpu_usage(&previous, &current, Duration::from_secs(1), 1);
+
+        assert!((usage - 20.0).abs() < 0.01);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn process_cpu_usage_does_not_mix_reused_pids() {
+        let previous = HashMap::from([(
+            ProcessCpuKey {
+                pid: 10,
+                start_time: 100,
+            },
+            1_000,
+        )]);
+        let current = HashMap::from([(
+            ProcessCpuKey {
+                pid: 10,
+                start_time: 101,
+            },
+            5_000,
+        )]);
+
+        let usage = calculate_process_cpu_usage(&previous, &current, Duration::from_secs(1), 1);
+
+        assert_eq!(usage, 0.0);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn process_cpu_usage_clamps_impossible_spikes() {
+        let process = ProcessCpuKey {
+            pid: 10,
+            start_time: 100,
+        };
+        let previous = HashMap::from([(process, 0)]);
+        let current = HashMap::from([(process, 2_000)]);
+
+        let usage = calculate_process_cpu_usage(&previous, &current, Duration::from_secs(1), 1);
+
+        assert_eq!(usage, 100.0);
     }
 }

@@ -59,11 +59,11 @@ const translations = {
     downloadEyebrow: "Open-source desktop app",
     downloadTitle: "Download ToolDock for your platform",
     downloadCopy:
-      "Release assets are published on GitHub. Choose the package for your operating system and follow the platform installer.",
+      "Open the latest GitHub Release, choose the package for your operating system, and follow the platform installer.",
     windowsCopy: "Use the NSIS installer or MSI package from the latest release.",
     macCopy: "Download the DMG for your Mac architecture from the latest release.",
     linuxCopy: "Choose an AppImage or distribution package from the latest release.",
-    viewDownloads: "View downloads →",
+    viewDownloads: "Open latest release →",
     requirementTitle: "Screen recording included",
     requirementCopy:
       "Release packages include a verified FFmpeg sidecar for H.264 MP4 recording and audio input detection.",
@@ -127,11 +127,11 @@ const translations = {
     recordingCaption: "带实时预览的屏幕录制",
     downloadEyebrow: "开源桌面应用",
     downloadTitle: "下载适合你平台的 ToolDock",
-    downloadCopy: "安装包发布在 GitHub Releases。请选择对应操作系统的文件，并按照平台安装流程完成安装。",
+    downloadCopy: "前往最新的 GitHub Release，选择对应操作系统的安装包，并按照平台安装流程完成安装。",
     windowsCopy: "从最新版本中选择 NSIS 安装程序或 MSI 安装包。",
     macCopy: "根据 Mac 芯片架构下载最新版本中的 DMG。",
     linuxCopy: "从最新版本中选择 AppImage 或对应发行版安装包。",
-    viewDownloads: "查看下载 →",
+    viewDownloads: "前往最新版本 →",
     requirementTitle: "内置录屏能力",
     requirementCopy: "正式安装包已包含经过校验的 FFmpeg sidecar，可直接使用 H.264 MP4 录制和音频输入检测。",
     openEyebrow: "开源，本地优先",
@@ -193,11 +193,11 @@ const translations = {
     recordingCaption: "ライブプレビュー付き画面録画",
     downloadEyebrow: "オープンソースのデスクトップアプリ",
     downloadTitle: "お使いの環境向け ToolDock をダウンロード",
-    downloadCopy: "インストールファイルは GitHub Releases で公開されます。OS に合うパッケージを選択してください。",
+    downloadCopy: "最新の GitHub Release を開き、OS に合うインストールファイルを選択してください。",
     windowsCopy: "最新版から NSIS インストーラーまたは MSI パッケージを選択。",
     macCopy: "Mac のアーキテクチャに合う DMG を最新版からダウンロード。",
     linuxCopy: "最新版から AppImage またはディストリビューション用パッケージを選択。",
-    viewDownloads: "ダウンロードを見る →",
+    viewDownloads: "最新リリースを開く →",
     requirementTitle: "画面録画を同梱",
     requirementCopy: "リリースパッケージには検証済み FFmpeg sidecar が含まれ、H.264 MP4 録画と音声入力検出を利用できます。",
     openEyebrow: "オープンソース、ローカル優先",
@@ -259,11 +259,11 @@ const translations = {
     recordingCaption: "실시간 미리보기가 있는 화면 녹화",
     downloadEyebrow: "오픈 소스 데스크톱 앱",
     downloadTitle: "내 플랫폼에 맞는 ToolDock 다운로드",
-    downloadCopy: "설치 파일은 GitHub Releases에 게시됩니다. 운영체제에 맞는 패키지를 선택하세요.",
+    downloadCopy: "최신 GitHub Release를 열고 운영체제에 맞는 설치 파일을 선택하세요.",
     windowsCopy: "최신 릴리스에서 NSIS 설치 프로그램 또는 MSI 패키지를 선택합니다.",
     macCopy: "Mac 아키텍처에 맞는 DMG를 최신 릴리스에서 다운로드합니다.",
     linuxCopy: "최신 릴리스에서 AppImage 또는 배포판 패키지를 선택합니다.",
-    viewDownloads: "다운로드 보기 →",
+    viewDownloads: "최신 릴리스 열기 →",
     requirementTitle: "화면 녹화 포함",
     requirementCopy: "릴리스 패키지에는 검증된 FFmpeg sidecar가 포함되어 H.264 MP4 녹화와 오디오 입력 감지를 바로 사용할 수 있습니다.",
     openEyebrow: "오픈 소스, 로컬 우선",
@@ -317,22 +317,19 @@ function setLanguage(language) {
   });
 }
 
-function detectRepository() {
-  const githubPagesMatch = window.location.hostname.match(/^([^.]+)\.github\.io$/);
-  const repositoryName = window.location.pathname.split("/").filter(Boolean)[0];
-
-  if (!githubPagesMatch || !repositoryName) return null;
-  return `https://github.com/${githubPagesMatch[1]}/${repositoryName}`;
-}
-
-const repositoryUrl = detectRepository();
+const repositoryUrl = "https://github.com/PXTechAI/ToolDock";
+const latestReleaseUrl = `${repositoryUrl}/releases/latest`;
 
 document.querySelectorAll(".repository-link").forEach((link) => {
-  link.href = repositoryUrl || "../";
+  link.href = repositoryUrl;
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
 });
 
 document.querySelectorAll(".releases-link").forEach((link) => {
-  link.href = repositoryUrl ? `${repositoryUrl}/releases/latest` : "../releases";
+  link.href = latestReleaseUrl;
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
 });
 
 languageButtons.forEach((button) => {

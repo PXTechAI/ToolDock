@@ -44,7 +44,9 @@ export function ScreenshotTool({
   const [lastShot, setLastShot] = useState<ScreenshotResult | null>(null);
   const [history, setHistory] = useState<ScreenshotResult[]>([]);
   const [error, setError] = useState("");
+  const [showCopiedToast, setShowCopiedToast] = useState(false);
   const handledShortcut = useRef(0);
+  const toastTimer = useRef<number | null>(null);
 
   useEffect(() => {
     listMonitors()
@@ -65,10 +67,26 @@ export function ScreenshotTool({
       .catch((reason) => setError(String(reason)));
   }, [settings.screenshotDir]);
 
+  useEffect(() => {
+    return () => {
+      if (toastTimer.current !== null) {
+        window.clearTimeout(toastTimer.current);
+      }
+    };
+  }, []);
+
   function remember(result: ScreenshotResult) {
     setLastShot(result);
     setHistory((current) => [result, ...current.filter((item) => item.path !== result.path)].slice(0, 20));
     onStatus(t("screenshot.saved"));
+    setShowCopiedToast(true);
+    if (toastTimer.current !== null) {
+      window.clearTimeout(toastTimer.current);
+    }
+    toastTimer.current = window.setTimeout(() => {
+      setShowCopiedToast(false);
+      toastTimer.current = null;
+    }, 3200);
   }
 
   async function capture(requestedMode: CaptureMode = mode, requestedDelay = delay) {
@@ -90,9 +108,9 @@ export function ScreenshotTool({
           onStatus(t("screenshot.cancelled"));
           return;
         }
-        remember(await finishRegionCapture(selection, settings.screenshotDir));
+        await remember(await finishRegionCapture(selection, settings.screenshotDir));
       } else {
-        remember(await captureScreenshot(monitorId, settings.screenshotDir));
+        await remember(await captureScreenshot(monitorId, settings.screenshotDir));
       }
     } catch (reason) {
       setError(String(reason));
@@ -244,6 +262,17 @@ export function ScreenshotTool({
         )}
       </div>
 
+      {showCopiedToast && (
+        <div className="screenshot-copied-toast" role="status" aria-live="polite">
+          <span className="screenshot-copied-toast-icon">
+            <Check size={18} strokeWidth={2.4} />
+          </span>
+          <span>
+            <strong>{t("screenshot.notificationTitle")}</strong>
+            <small>{t("screenshot.notificationBody")}</small>
+          </span>
+        </div>
+      )}
     </section>
   );
 }

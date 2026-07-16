@@ -1,10 +1,32 @@
-export type ToolId = "color" | "ports" | "screenshot" | "recording" | "strings" | "settings";
+export type ToolId =
+  | "color"
+  | "ports"
+  | "screenshot"
+  | "recording"
+  | "strings"
+  | "lan"
+  | "system"
+  | "settings";
 export type ThemeMode = "dark" | "light";
 export type AppLanguage = "zh-CN" | "en" | "ja" | "ko";
 export type UiFont = "system" | "sans" | "cjk" | "mono";
+export type SystemTrayMetric =
+  | "none"
+  | "cpu"
+  | "memory"
+  | "network";
+export type SystemWidgetMode = "floating" | "taskbar";
+export type SystemWidgetMetric =
+  | "cpu"
+  | "memory"
+  | "temperature"
+  | "download"
+  | "upload";
+export type RecordingAudioSource = "none" | "system" | "microphone";
 
 export interface PortProcess {
-  port: number;
+  port: number | null;
+  ports: number[];
   protocol: string;
   state: string;
   pid: number;
@@ -90,6 +112,65 @@ export interface AppSettings {
   screenshotShortcut: string;
   recordingShortcut: string;
   closeToTray: boolean;
+  lanEnabled: boolean;
+  lanDeviceId: string;
+  lanDeviceName: string;
+  lanPassword: string;
+  lanReceiveDir: string;
+  systemWidgetEnabled: boolean;
+  systemWidgetAlwaysOnTop: boolean;
+  systemWidgetMode: SystemWidgetMode;
+  systemWidgetMetrics: SystemWidgetMetric[];
+  systemTrayMetric: SystemTrayMetric;
+}
+
+export interface SystemMetrics {
+  cpuUsage: number;
+  memoryUsedBytes: number;
+  memoryTotalBytes: number;
+  memoryUsage: number;
+  cpuTemperatureC: number | null;
+  fanRpm: number | null;
+  networkDownloadBytesPerSecond: number;
+  networkUploadBytesPerSecond: number;
+  timestampMs: number;
+}
+
+export interface LanDevice {
+  id: string;
+  name: string;
+  address: string;
+  port: number;
+  passwordRequired: boolean;
+  lastSeenMs: number;
+  connected: boolean;
+}
+
+export interface LanStatus {
+  enabled: boolean;
+  localDevice?: LanDevice;
+  receiveDir: string;
+}
+
+export interface LanTransferRecord {
+  id: string;
+  fileName: string;
+  path: string;
+  sizeBytes: number;
+  direction: "incoming" | "outgoing";
+  deviceId: string;
+  deviceName: string;
+  status: "receiving" | "sending" | "completed" | "failed";
+  createdAt: string;
+  message: string;
+}
+
+export interface LanClipboardRecord {
+  id: string;
+  direction: "incoming" | "outgoing";
+  deviceName: string;
+  preview: string;
+  createdAt: string;
 }
 
 export type RecordingSource =
@@ -103,7 +184,7 @@ export interface RecordingConfig {
   height?: number;
   fps: number;
   bitrateKbps: number;
-  audioEnabled: boolean;
+  audioSource: RecordingAudioSource;
   audioInputId?: string;
   outputDirectory?: string;
 }

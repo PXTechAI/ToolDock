@@ -116,5 +116,16 @@ jobs:
       - name: Prepare FFmpeg sidecar
         run: npm run prepare:ffmpeg
 
+      - name: Set up .NET
+        if: runner.os == 'Windows'
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Prepare hardware monitor sidecar
+        run: npm run prepare:hardware-monitor
+        env:
+          TOOLDOCK_TARGET_TRIPLE: ${{ matrix.name == 'Windows' && 'x86_64-pc-windows-msvc' || matrix.name == 'Linux' && 'x86_64-unknown-linux-gnu' || matrix.name == 'macOS ARM' && 'aarch64-apple-darwin' || 'x86_64-apple-darwin' }}
+
       - name: Check native application
         run: cargo check --locked --manifest-path src-tauri/Cargo.toml

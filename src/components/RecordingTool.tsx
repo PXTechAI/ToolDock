@@ -19,6 +19,7 @@ import {
   Square,
   Timer,
   Video,
+  Volume2,
   VolumeX,
 } from "lucide-react";
 import {
@@ -44,6 +45,7 @@ import type {
   DesktopRegionSelection,
   MonitorInfo,
   RecordingCapabilities,
+  RecordingAudioSource,
   RecordingPreview,
   RecordingResult,
 } from "../types";
@@ -93,7 +95,7 @@ export function RecordingTool({
   const [resolution, setResolution] = useState("native");
   const [fps, setFps] = useState(30);
   const [bitrate, setBitrate] = useState(8_000);
-  const [audioEnabled, setAudioEnabled] = useState(false);
+  const [audioSource, setAudioSource] = useState<RecordingAudioSource>("none");
   const [audioInputs, setAudioInputs] = useState<AudioInputInfo[]>([]);
   const [audioInputId, setAudioInputId] = useState("");
   const [capabilities, setCapabilities] = useState<RecordingCapabilities | null>(null);
@@ -237,8 +239,8 @@ export function RecordingTool({
         height: selectedResolution?.height,
         fps,
         bitrateKbps: bitrate,
-        audioEnabled,
-        audioInputId: audioEnabled ? audioInputId : undefined,
+        audioSource,
+        audioInputId: audioSource === "microphone" ? audioInputId : undefined,
         outputDirectory: settings.recordingDir,
       });
       setActive(true);
@@ -512,24 +514,46 @@ export function RecordingTool({
           </div>
 
           <div className="audio-recording-control">
-            <div className="toggle-row">
-              <span>
-                <strong>{t("recording.audio")}</strong>
-                <small>{t("recording.audioHint")}</small>
-              </span>
-              <button
-                className={audioEnabled ? "toggle active" : "toggle"}
-                role="switch"
-                aria-checked={audioEnabled}
-                disabled={active || audioInputs.length === 0}
-                onClick={() => setAudioEnabled((value) => !value)}
-              >
-                <span />
-              </button>
+            <div>
+              <span className="panel-label">{t("recording.audioSource")}</span>
+              <div className="segmented recording-audio-source">
+                <button
+                  className={audioSource === "none" ? "active" : ""}
+                  disabled={active}
+                  onClick={() => setAudioSource("none")}
+                >
+                  <VolumeX size={14} />
+                  {t("recording.audioNone")}
+                </button>
+                <button
+                  className={audioSource === "system" ? "active" : ""}
+                  disabled={active}
+                  onClick={() => setAudioSource("system")}
+                >
+                  <Volume2 size={14} />
+                  {t("recording.systemAudio")}
+                </button>
+                <button
+                  className={audioSource === "microphone" ? "active" : ""}
+                  disabled={active || audioInputs.length === 0}
+                  onClick={() => setAudioSource("microphone")}
+                >
+                  <Mic size={14} />
+                  {t("recording.microphone")}
+                </button>
+              </div>
+              <small className="audio-source-hint">
+                {audioSource === "system"
+                  ? t("recording.systemAudioHint")
+                  : audioSource === "microphone"
+                    ? t("recording.microphoneHint")
+                    : t("recording.audioOffHint")}
+              </small>
             </div>
-            <label>
+            {audioSource === "microphone" && (
+              <label>
               <span className="panel-label source-label-row">
-                <span>{t("recording.audioSource")}</span>
+                <span>{t("recording.microphoneInput")}</span>
                 <button
                   className="inline-icon-button"
                   title={t("recording.refreshAudio")}
@@ -544,9 +568,9 @@ export function RecordingTool({
               </span>
               <SelectMenu
                 value={audioInputId}
-                ariaLabel={t("recording.audioSource")}
-                icon={audioEnabled ? <Mic size={17} /> : <VolumeX size={17} />}
-                disabled={active || !audioEnabled || audioInputs.length === 0}
+                ariaLabel={t("recording.microphoneInput")}
+                icon={<Mic size={17} />}
+                disabled={active || audioInputs.length === 0}
                 options={
                   audioInputs.length === 0
                     ? [{ value: "", label: t("recording.noAudioDevices") }]
@@ -559,7 +583,8 @@ export function RecordingTool({
                 }
                 onChange={setAudioInputId}
               />
-            </label>
+              </label>
+            )}
           </div>
 
           <div className={capabilities?.available ? "encoder-status ready" : "encoder-status"}>
@@ -587,6 +612,7 @@ export function RecordingTool({
               loading
               || (!active && !capabilities?.available)
               || (!active && sourceMode === "window" && windowId === null)
+              || (!active && audioSource === "microphone" && !audioInputId)
             }
           >
             {loading ? (
@@ -622,7 +648,11 @@ export function RecordingTool({
               ? t("recording.nativeResolution")
               : resolutions.find((item) => item.id === resolution)?.label}
             {" · "}
-            {audioEnabled ? t("recording.audioOn") : t("recording.audioOff")}
+            {audioSource === "system"
+              ? t("recording.systemAudio")
+              : audioSource === "microphone"
+                ? t("recording.microphone")
+                : t("recording.audioOff")}
           </small>
         </span>
         <span>
