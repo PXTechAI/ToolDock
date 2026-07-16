@@ -52,7 +52,7 @@ use xcap::{
     image::{self, GenericImageView, RgbaImage},
     Monitor, Window,
 };
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
 use xcap::{Frame, VideoRecorder};
 
 #[derive(Serialize)]
@@ -2710,7 +2710,7 @@ fn finish_recording_result(
     })
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
 fn encode_monitor_recording(
     app: tauri::AppHandle,
     recorder: VideoRecorder,
@@ -3160,6 +3160,7 @@ fn encode_monitor_polling_recording(
 
 #[cfg(not(target_os = "windows"))]
 enum PreparedRecordingInput {
+    #[cfg(target_os = "linux")]
     Monitor {
         recorder: VideoRecorder,
         receiver: Receiver<Frame>,
@@ -3177,7 +3178,7 @@ enum PreparedRecordingInput {
     },
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
 fn prepare_monitor_recording_input(
     monitor_id: usize,
     requested_region: Option<CaptureRegion>,
@@ -3232,6 +3233,38 @@ fn prepare_monitor_recording_input(
     let first_image = monitor
         .capture_image()
         .map_err(|fallback_error| format!("{recorder_error}；兼容采集也失败：{fallback_error}"))?;
+    let (frame_width, frame_height) = first_image.dimensions();
+    let region = requested_region
+        .map(|region| normalize_capture_region(region, frame_width, frame_height))
+        .transpose()?;
+    let input_width = region
+        .as_ref()
+        .map(|region| region.width)
+        .unwrap_or(frame_width);
+    let input_height = region
+        .as_ref()
+        .map(|region| region.height)
+        .unwrap_or(frame_height);
+    Ok((
+        PreparedRecordingInput::MonitorPolling {
+            monitor_id,
+            first_image,
+            region,
+        },
+        input_width,
+        input_height,
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn prepare_monitor_recording_input(
+    monitor_id: usize,
+    requested_region: Option<CaptureRegion>,
+) -> Result<(PreparedRecordingInput, u32, u32), String> {
+    let (monitor, _) = selected_monitor(monitor_id)?;
+    let first_image = monitor
+        .capture_image()
+        .map_err(|error| format!("无法捕获所选屏幕：{error}"))?;
     let (frame_width, frame_height) = first_image.dimensions();
     let region = requested_region
         .map(|region| normalize_capture_region(region, frame_width, frame_height))
@@ -3326,6 +3359,7 @@ fn prepare_recording(
         ) {
             Ok(process) => process,
             Err(error) => {
+                #[cfg(target_os = "linux")]
                 if let PreparedRecordingInput::Monitor { recorder, .. } = &input {
                     let _ = recorder.stop();
                 }
@@ -3337,6 +3371,7 @@ fn prepare_recording(
         let thread_path = path.clone();
         let fps = config.fps;
         let join = thread::spawn(move || match input {
+            #[cfg(target_os = "linux")]
             PreparedRecordingInput::Monitor {
                 recorder,
                 receiver,
