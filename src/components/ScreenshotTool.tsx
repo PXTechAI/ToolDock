@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from "react";
 import {
   Camera,
   Check,
-  ChevronDown,
   Crop,
   Image as ImageIcon,
   LoaderCircle,
@@ -21,6 +20,7 @@ import type {
   MonitorInfo,
   ScreenshotResult,
 } from "../types";
+import { SelectMenu } from "./SelectMenu";
 import { ToolHeader } from "./ToolHeader";
 
 type CaptureMode = "full" | "region";
@@ -150,18 +150,18 @@ export function ScreenshotTool({
           {mode === "full" ? (
             <label>
               <span className="panel-label">{t("common.display")}</span>
-              <span className="select-wrap">
-                <Monitor size={17} />
-                <select value={monitorId} onChange={(event) => setMonitorId(Number(event.target.value))}>
-                  {monitors.map((monitor) => (
-                    <option value={monitor.id} key={monitor.id}>
-                      {monitor.name} · {monitor.width}×{monitor.height}
-                      {monitor.isPrimary ? ` (${t("common.primary")})` : ""}
-                    </option>
-                  ))}
-                </select>
-                <ChevronDown size={16} />
-              </span>
+              <SelectMenu
+                value={String(monitorId)}
+                ariaLabel={t("common.display")}
+                icon={<Monitor size={17} />}
+                options={monitors.map((monitor) => ({
+                  value: String(monitor.id),
+                  label: `${monitor.name} · ${monitor.width}×${monitor.height}${
+                    monitor.isPrimary ? ` (${t("common.primary")})` : ""
+                  }`,
+                }))}
+                onChange={(value) => setMonitorId(Number(value))}
+              />
             </label>
           ) : (
             <div className="capture-region-hint">

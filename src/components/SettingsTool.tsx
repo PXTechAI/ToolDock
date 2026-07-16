@@ -19,6 +19,7 @@ import {
 } from "../i18n";
 import { chooseDirectory } from "../lib/native";
 import type { AppSettings } from "../types";
+import { SelectMenu } from "./SelectMenu";
 import { ToolHeader } from "./ToolHeader";
 
 export function SettingsTool({
@@ -94,21 +95,21 @@ export function SettingsTool({
             <strong>{t("settings.language")}</strong>
             <small>{t("settings.languageHint")}</small>
           </span>
-          <select
+          <SelectMenu
+            className="setting-select"
             value={draft.language}
-            onChange={(event) =>
+            ariaLabel={t("settings.language")}
+            options={languageOptions.map((option) => ({
+              value: option.value,
+              label: option.label,
+            }))}
+            onChange={(value) =>
               setDraft((current) => ({
                 ...current,
-                language: event.target.value as AppSettings["language"],
+                language: value as AppSettings["language"],
               }))
             }
-          >
-            {languageOptions.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </select>
+          />
         </div>
 
         <div className="setting-row appearance-setting">
@@ -116,24 +117,22 @@ export function SettingsTool({
             <strong>{t("settings.font")}</strong>
             <small>{t("settings.fontHint")}</small>
           </span>
-          <span className="appearance-select">
-            <Type size={15} />
-            <select
-              value={draft.uiFont}
-              onChange={(event) =>
-                setDraft((current) => ({
-                  ...current,
-                  uiFont: event.target.value as AppSettings["uiFont"],
-                }))
-              }
-            >
-              {fontOptions.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {t(option.key)}
-                </option>
-              ))}
-            </select>
-          </span>
+          <SelectMenu
+            className="setting-select"
+            value={draft.uiFont}
+            ariaLabel={t("settings.font")}
+            icon={<Type size={15} />}
+            options={fontOptions.map((option) => ({
+              value: option.value,
+              label: t(option.key),
+            }))}
+            onChange={(value) =>
+              setDraft((current) => ({
+                ...current,
+                uiFont: value as AppSettings["uiFont"],
+              }))
+            }
+          />
         </div>
 
         <div className="setting-row appearance-setting">
