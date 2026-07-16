@@ -1,6 +1,10 @@
 use arboard::{Clipboard, ImageData};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chrono::{DateTime, Local};
+#[cfg(not(target_os = "windows"))]
+use clipboard_rs::{Clipboard as _, ClipboardContext};
+#[cfg(target_os = "windows")]
+use clipboard_win::{formats::FileList, Clipboard as WindowsClipboard, Setter};
 use netstat2::{get_sockets_info, AddressFamilyFlags, ProtocolFlags, ProtocolSocketInfo, TcpState};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -9,9 +13,9 @@ use std::{
     fs,
     io::{Cursor, Read, Write},
     path::{Path, PathBuf},
-    process::{Child, ChildStdin, Command, Stdio},
+    process::{Child, ChildStdin, ChildStdout, Command, Stdio},
     sync::{
-        mpsc::{self, Receiver, Sender, TryRecvError},
+        mpsc::{self, Receiver, Sender, SyncSender, TryRecvError, TrySendError},
         Mutex,
     },
     thread::{self, JoinHandle},
@@ -24,10 +28,32 @@ use tauri::{
     Emitter, Manager, PhysicalPosition, PhysicalSize, State, WebviewUrl, WebviewWindowBuilder,
     WindowEvent,
 };
+#[cfg(target_os = "windows")]
+use windows::Win32::{
+    Graphics::Gdi::{
+        BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits,
+        GetWindowDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, SRCCOPY,
+    },
+    UI::WindowsAndMessaging::GetDesktopWindow,
+};
+#[cfg(target_os = "windows")]
+use windows_capture::{
+    capture::{CaptureControl, Context as WindowsCaptureContext, GraphicsCaptureApiHandler},
+    frame::Frame as WindowsCaptureFrame,
+    graphics_capture_api::InternalCaptureControl,
+    settings::{
+        ColorFormat as WindowsCaptureColorFormat, CursorCaptureSettings, DirtyRegionSettings,
+        DrawBorderSettings, MinimumUpdateIntervalSettings, SecondaryWindowSettings,
+        Settings as WindowsCaptureSettings,
+    },
+    window::Window as WindowsCaptureWindow,
+};
 use xcap::{
     image::{self, GenericImageView, RgbaImage},
-    Frame, Monitor, VideoRecorder, Window,
+    Monitor, Window,
 };
+#[cfg(not(target_os = "windows"))]
+use xcap::{Frame, VideoRecorder};
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -115,6 +141,22 @@ struct RegionSelectorSession {
     overlays: HashMap<usize, RegionSelectorOverlay>,
     images: HashMap<usize, RgbaImage>,
     monitor_names: HashMap<usize, String>,
+}
+
+struct OverlayAsset {
+    content_type: &'static str,
+    bytes: Vec<u8>,
+}
+
+struct MonitorSnapshot {
+    monitor_id: usize,
+    image: RgbaImage,
+    width: u32,
+    height: u32,
+    origin_x: i32,
+    origin_y: i32,
+    is_primary: bool,
+    monitor_name: String,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -268,6 +310,9 @@ struct RecordingCapabilities {
 struct CaptureState(Mutex<HashMap<String, RgbaImage>>);
 
 #[derive(Default)]
+struct OverlayAssetState(Mutex<HashMap<String, OverlayAsset>>);
+
+#[derive(Default)]
 struct ColorPickerState(Mutex<HashMap<usize, ColorPickerOverlay>>);
 
 #[derive(Default)]
@@ -275,6 +320,14 @@ struct RegionSelectorState(Mutex<Option<RegionSelectorSession>>);
 
 #[derive(Default)]
 struct RecordingState(Mutex<Option<RecordingSession>>);
+
+#[cfg(not(target_os = "windows"))]
+#[derive(Default)]
+struct FileClipboardState(Mutex<Option<ClipboardContext>>);
+
+#[cfg(target_os = "windows")]
+#[derive(Default)]
+struct FileClipboardState;
 
 struct RecordingSession {
     stop_tx: Sender<()>,
@@ -493,11 +546,11 @@ fn tray_labels(language: &str) -> (&'static str, &'static str) {
 }
 
 fn default_ui_font() -> String {
-    "system".into()
+    "sans".into()
 }
 
 fn default_font_scale() -> f64 {
-    1.1
+    1.2
 }
 
 fn settings_file() -> PathBuf {
@@ -509,7 +562,7 @@ fn settings_file() -> PathBuf {
 
 fn default_settings() -> AppSettings {
     AppSettings {
-        theme: "dark".into(),
+        theme: "light".into(),
         language: default_language(),
         ui_font: default_ui_font(),
         font_scale: default_font_scale(),
@@ -697,9 +750,7 @@ async fn capture_screenshot(
 ) -> Result<ScreenshotResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let (monitor, monitor_name) = selected_monitor(monitor_id)?;
-        let image = monitor
-            .capture_image()
-            .map_err(|error| format!("截图失败：{error}"))?;
+        let image = capture_monitor_snapshot(&monitor)?;
         save_screenshot_image(&image, monitor_name, directory)
     })
     .await
@@ -836,21 +887,310 @@ async fn list_recording_history(directory: Option<String>) -> Result<Vec<Recordi
     .map_err(|error| format!("录屏历史任务失败：{error}"))?
 }
 
-fn encode_image_data_url(image: &RgbaImage) -> Result<String, String> {
-    let mut bytes = Cursor::new(Vec::new());
-    image::DynamicImage::ImageRgba8(image.clone())
-        .write_to(&mut bytes, image::ImageFormat::Png)
-        .map_err(|error| format!("无法编码取色器屏幕快照：{error}"))?;
-    Ok(format!(
-        "data:image/png;base64,{}",
-        STANDARD.encode(bytes.into_inner())
-    ))
+fn overlay_asset_url(key: &str) -> String {
+    #[cfg(any(target_os = "windows", target_os = "android"))]
+    {
+        format!("http://tooldock-snapshot.localhost/{key}")
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "android")))]
+    {
+        format!("tooldock-snapshot://localhost/{key}")
+    }
+}
+
+fn encode_color_picker_bmp(image: &RgbaImage) -> Result<Vec<u8>, String> {
+    let pixel_bytes = (image.width() as usize)
+        .checked_mul(image.height() as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| "取色器屏幕快照过大".to_string())?;
+    let file_size = 54usize
+        .checked_add(pixel_bytes)
+        .ok_or_else(|| "取色器屏幕快照过大".to_string())?;
+    let file_size_u32 = u32::try_from(file_size).map_err(|_| "取色器屏幕快照过大".to_string())?;
+    let width = i32::try_from(image.width()).map_err(|_| "取色器宽度过大".to_string())?;
+    let height = i32::try_from(image.height()).map_err(|_| "取色器高度过大".to_string())?;
+    let pixel_bytes_u32 =
+        u32::try_from(pixel_bytes).map_err(|_| "取色器屏幕快照过大".to_string())?;
+
+    let mut bytes = Vec::with_capacity(file_size);
+    bytes.extend_from_slice(b"BM");
+    bytes.extend_from_slice(&file_size_u32.to_le_bytes());
+    bytes.extend_from_slice(&[0; 4]);
+    bytes.extend_from_slice(&54u32.to_le_bytes());
+    bytes.extend_from_slice(&40u32.to_le_bytes());
+    bytes.extend_from_slice(&width.to_le_bytes());
+    bytes.extend_from_slice(&(-height).to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&32u16.to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    bytes.extend_from_slice(&pixel_bytes_u32.to_le_bytes());
+    bytes.extend_from_slice(&[0; 16]);
+    for pixel in image.pixels() {
+        bytes.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
+    }
+    Ok(bytes)
+}
+
+fn encode_overlay_preview(image: &RgbaImage) -> Result<Vec<u8>, String> {
+    const MAX_PREVIEW_DIMENSION: u32 = 1920;
+    let max_dimension = image.width().max(image.height());
+    let (width, height) = if max_dimension > MAX_PREVIEW_DIMENSION {
+        let scale = MAX_PREVIEW_DIMENSION as f64 / max_dimension as f64;
+        (
+            (image.width() as f64 * scale).round().max(1.0) as u32,
+            (image.height() as f64 * scale).round().max(1.0) as u32,
+        )
+    } else {
+        (image.width(), image.height())
+    };
+    if width == image.width() && height == image.height() {
+        return encode_color_picker_bmp(image);
+    }
+
+    let pixel_bytes = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| "区域选择屏幕快照过大".to_string())?;
+    let file_size = 54usize
+        .checked_add(pixel_bytes)
+        .ok_or_else(|| "区域选择屏幕快照过大".to_string())?;
+    let mut bytes = Vec::with_capacity(file_size);
+    bytes.extend_from_slice(b"BM");
+    bytes.extend_from_slice(
+        &u32::try_from(file_size)
+            .map_err(|_| "区域选择屏幕快照过大".to_string())?
+            .to_le_bytes(),
+    );
+    bytes.extend_from_slice(&[0; 4]);
+    bytes.extend_from_slice(&54u32.to_le_bytes());
+    bytes.extend_from_slice(&40u32.to_le_bytes());
+    bytes.extend_from_slice(
+        &i32::try_from(width)
+            .map_err(|_| "区域选择宽度过大".to_string())?
+            .to_le_bytes(),
+    );
+    bytes.extend_from_slice(
+        &(-i32::try_from(height).map_err(|_| "区域选择高度过大".to_string())?).to_le_bytes(),
+    );
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&32u16.to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    bytes.extend_from_slice(
+        &u32::try_from(pixel_bytes)
+            .map_err(|_| "区域选择屏幕快照过大".to_string())?
+            .to_le_bytes(),
+    );
+    bytes.extend_from_slice(&[0; 16]);
+
+    let source = image.as_raw();
+    let source_width = image.width() as usize;
+    let source_x_offsets = (0..width)
+        .map(|output_x| (output_x as u64 * image.width() as u64 / width as u64) as usize * 4)
+        .collect::<Vec<_>>();
+    for output_y in 0..height {
+        let source_y = (output_y as u64 * image.height() as u64 / height as u64) as usize;
+        let row_offset = source_y * source_width * 4;
+        for source_x_offset in &source_x_offsets {
+            let index = row_offset + source_x_offset;
+            bytes.extend_from_slice(&[
+                source[index + 2],
+                source[index + 1],
+                source[index],
+                source[index + 3],
+            ]);
+        }
+    }
+    Ok(bytes)
+}
+
+#[cfg(target_os = "windows")]
+fn capture_monitor_area(x: i32, y: i32, width: u32, height: u32) -> Result<RgbaImage, String> {
+    let width_i32 = i32::try_from(width).map_err(|_| "显示器宽度过大".to_string())?;
+    let height_i32 = i32::try_from(height).map_err(|_| "显示器高度过大".to_string())?;
+    let byte_count = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| "显示器快照尺寸过大".to_string())?;
+
+    unsafe {
+        let desktop_window = GetDesktopWindow();
+        let desktop_dc = GetWindowDC(Some(desktop_window));
+        if desktop_dc.is_invalid() {
+            return Err("无法获取桌面绘图上下文".into());
+        }
+        let memory_dc = CreateCompatibleDC(Some(desktop_dc));
+        if memory_dc.is_invalid() {
+            let _ = windows::Win32::Graphics::Gdi::ReleaseDC(Some(desktop_window), desktop_dc);
+            return Err("无法创建屏幕快照绘图上下文".into());
+        }
+        let bitmap = CreateCompatibleBitmap(desktop_dc, width_i32, height_i32);
+        if bitmap.is_invalid() {
+            let _ = DeleteDC(memory_dc);
+            let _ = windows::Win32::Graphics::Gdi::ReleaseDC(Some(desktop_window), desktop_dc);
+            return Err("无法创建屏幕快照位图".into());
+        }
+
+        let previous = SelectObject(memory_dc, bitmap.into());
+        let capture_result = BitBlt(
+            memory_dc,
+            0,
+            0,
+            width_i32,
+            height_i32,
+            Some(desktop_dc),
+            x,
+            y,
+            SRCCOPY,
+        );
+        let mut bitmap_info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: width_i32,
+                biHeight: -height_i32,
+                biPlanes: 1,
+                biBitCount: 32,
+                biSizeImage: byte_count as u32,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut pixels = vec![0u8; byte_count];
+        let read_lines = if capture_result.is_ok() {
+            GetDIBits(
+                memory_dc,
+                bitmap,
+                0,
+                height,
+                Some(pixels.as_mut_ptr().cast()),
+                &mut bitmap_info,
+                DIB_RGB_COLORS,
+            )
+        } else {
+            0
+        };
+
+        SelectObject(memory_dc, previous);
+        let _ = DeleteObject(bitmap.into());
+        let _ = DeleteDC(memory_dc);
+        let _ = windows::Win32::Graphics::Gdi::ReleaseDC(Some(desktop_window), desktop_dc);
+
+        if capture_result.is_err() || read_lines == 0 {
+            return Err("无法捕获显示器快照".into());
+        }
+        for pixel in pixels.chunks_exact_mut(4) {
+            pixel.swap(0, 2);
+            pixel[3] = 255;
+        }
+        RgbaImage::from_raw(width, height, pixels)
+            .ok_or_else(|| "无法创建显示器快照图像".to_string())
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn capture_monitor_snapshot(monitor: &Monitor) -> Result<RgbaImage, String> {
+    capture_monitor_area(
+        monitor
+            .x()
+            .map_err(|error| format!("无法读取显示器横坐标：{error}"))?,
+        monitor
+            .y()
+            .map_err(|error| format!("无法读取显示器纵坐标：{error}"))?,
+        monitor
+            .width()
+            .map_err(|error| format!("无法读取显示器宽度：{error}"))?,
+        monitor
+            .height()
+            .map_err(|error| format!("无法读取显示器高度：{error}"))?,
+    )
+}
+
+#[cfg(not(target_os = "windows"))]
+fn capture_monitor_snapshot(monitor: &Monitor) -> Result<RgbaImage, String> {
+    monitor
+        .capture_image()
+        .map_err(|error| format!("无法捕获显示器快照：{error}"))
+}
+
+fn capture_all_monitor_snapshots() -> Result<Vec<MonitorSnapshot>, String> {
+    let monitors = Monitor::all().map_err(|error| format!("无法读取显示器：{error}"))?;
+
+    #[cfg(target_os = "windows")]
+    {
+        let descriptors = monitors
+            .into_iter()
+            .enumerate()
+            .map(|(monitor_id, monitor)| {
+                Ok::<_, String>((
+                    monitor_id,
+                    monitor.width().map_err(|error| error.to_string())?,
+                    monitor.height().map_err(|error| error.to_string())?,
+                    monitor.x().map_err(|error| error.to_string())?,
+                    monitor.y().map_err(|error| error.to_string())?,
+                    monitor.is_primary().unwrap_or(false),
+                    monitor
+                        .friendly_name()
+                        .unwrap_or_else(|_| format!("显示器 {}", monitor_id + 1)),
+                ))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        thread::scope(|scope| {
+            let handles = descriptors
+                .into_iter()
+                .map(
+                    |(monitor_id, width, height, origin_x, origin_y, is_primary, monitor_name)| {
+                        scope.spawn(move || {
+                            Ok::<_, String>(MonitorSnapshot {
+                                monitor_id,
+                                image: capture_monitor_area(origin_x, origin_y, width, height)?,
+                                width,
+                                height,
+                                origin_x,
+                                origin_y,
+                                is_primary,
+                                monitor_name,
+                            })
+                        })
+                    },
+                )
+                .collect::<Vec<_>>();
+            handles
+                .into_iter()
+                .map(|handle| {
+                    handle
+                        .join()
+                        .map_err(|_| "显示器快照线程异常退出".to_string())?
+                })
+                .collect::<Result<Vec<_>, String>>()
+        })
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        monitors
+            .into_iter()
+            .enumerate()
+            .map(|(monitor_id, monitor)| {
+                Ok::<_, String>(MonitorSnapshot {
+                    monitor_id,
+                    image: capture_monitor_snapshot(&monitor)?,
+                    width: monitor.width().map_err(|error| error.to_string())?,
+                    height: monitor.height().map_err(|error| error.to_string())?,
+                    origin_x: monitor.x().map_err(|error| error.to_string())?,
+                    origin_y: monitor.y().map_err(|error| error.to_string())?,
+                    is_primary: monitor.is_primary().unwrap_or(false),
+                    monitor_name: monitor
+                        .friendly_name()
+                        .unwrap_or_else(|_| format!("显示器 {}", monitor_id + 1)),
+                })
+            })
+            .collect()
+    }
 }
 
 fn close_region_selector_windows(app: &tauri::AppHandle) {
     for (label, window) in app.webview_windows() {
         if label.starts_with("region-selector-") {
-            let _ = window.close();
+            let _ = window.hide();
         }
     }
 }
@@ -860,7 +1200,9 @@ async fn open_region_selector(
     app: tauri::AppHandle,
     purpose: String,
     state: State<'_, RegionSelectorState>,
+    asset_state: State<'_, OverlayAssetState>,
 ) -> Result<(), String> {
+    let open_started = Instant::now();
     if purpose != "screenshot" && purpose != "recording" {
         return Err("不支持的区域选择用途".into());
     }
@@ -870,45 +1212,13 @@ async fn open_region_selector(
         .0
         .lock()
         .map_err(|_| "区域选择状态不可用".to_string())? = None;
+    asset_state
+        .0
+        .lock()
+        .map_err(|_| "区域快照状态不可用".to_string())?
+        .clear();
 
     let cursor_position = app.cursor_position().ok();
-    let (overlays, images, monitor_names) = tauri::async_runtime::spawn_blocking(|| {
-        let monitors = Monitor::all().map_err(|error| format!("无法读取显示器：{error}"))?;
-        let mut overlays = Vec::new();
-        let mut images = HashMap::new();
-        let mut monitor_names = HashMap::new();
-
-        for (monitor_id, monitor) in monitors.into_iter().enumerate() {
-            let width = monitor.width().map_err(|error| error.to_string())?;
-            let height = monitor.height().map_err(|error| error.to_string())?;
-            let image = monitor
-                .capture_image()
-                .map_err(|error| format!("无法准备区域选择屏幕快照：{error}"))?;
-            let monitor_name = monitor
-                .friendly_name()
-                .unwrap_or_else(|_| format!("显示器 {}", monitor_id + 1));
-            overlays.push(RegionSelectorOverlay {
-                monitor_id,
-                data_url: encode_image_data_url(&image)?,
-                width,
-                height,
-                origin_x: monitor.x().map_err(|error| error.to_string())?,
-                origin_y: monitor.y().map_err(|error| error.to_string())?,
-                is_primary: monitor.is_primary().unwrap_or(false),
-            });
-            images.insert(monitor_id, image);
-            monitor_names.insert(monitor_id, monitor_name);
-        }
-
-        Ok::<_, String>((overlays, images, monitor_names))
-    })
-    .await
-    .map_err(|error| format!("区域选择准备任务失败：{error}"))??;
-
-    if overlays.is_empty() {
-        return Err("没有可供选择的显示器，请检查屏幕捕获权限".into());
-    }
-
     let token = format!(
         "{}-{}",
         std::process::id(),
@@ -917,6 +1227,87 @@ async fn open_region_selector(
             .unwrap_or_default()
             .as_nanos()
     );
+    let asset_token = token.clone();
+    let (overlays, images, monitor_names, assets) =
+        tauri::async_runtime::spawn_blocking(move || {
+            let raw_captures = capture_all_monitor_snapshots()?;
+            let mut captures = thread::scope(|scope| {
+                let handles = raw_captures
+                    .into_iter()
+                    .map(|snapshot| {
+                        let MonitorSnapshot {
+                            monitor_id,
+                            image,
+                            width,
+                            height,
+                            origin_x,
+                            origin_y,
+                            is_primary,
+                            monitor_name,
+                        } = snapshot;
+                        let asset_key = format!("region-{asset_token}-{monitor_id}.bmp");
+                        scope.spawn(move || {
+                            let bytes = encode_overlay_preview(&image)?;
+                            let overlay = RegionSelectorOverlay {
+                                monitor_id,
+                                data_url: overlay_asset_url(&asset_key),
+                                width,
+                                height,
+                                origin_x,
+                                origin_y,
+                                is_primary,
+                            };
+                            Ok::<_, String>((
+                                monitor_id,
+                                overlay,
+                                image,
+                                monitor_name,
+                                (
+                                    asset_key,
+                                    OverlayAsset {
+                                        content_type: "image/bmp",
+                                        bytes,
+                                    },
+                                ),
+                            ))
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                handles
+                    .into_iter()
+                    .map(|handle| {
+                        handle
+                            .join()
+                            .map_err(|_| "区域选择屏幕快照线程异常退出".to_string())?
+                    })
+                    .collect::<Result<Vec<_>, String>>()
+            })?;
+            captures.sort_by_key(|(monitor_id, _, _, _, _)| *monitor_id);
+
+            let mut overlays = Vec::with_capacity(captures.len());
+            let mut images = HashMap::new();
+            let mut monitor_names = HashMap::new();
+            let mut assets = Vec::with_capacity(captures.len());
+            for (monitor_id, overlay, image, monitor_name, asset) in captures {
+                overlays.push(overlay);
+                images.insert(monitor_id, image);
+                monitor_names.insert(monitor_id, monitor_name);
+                assets.push(asset);
+            }
+
+            Ok::<_, String>((overlays, images, monitor_names, assets))
+        })
+        .await
+        .map_err(|error| format!("区域选择准备任务失败：{error}"))??;
+
+    if overlays.is_empty() {
+        return Err("没有可供选择的显示器，请检查屏幕捕获权限".into());
+    }
+    asset_state
+        .0
+        .lock()
+        .map_err(|_| "区域快照状态不可用".to_string())?
+        .extend(assets);
     {
         let overlay_map = overlays
             .iter()
@@ -949,24 +1340,30 @@ async fn open_region_selector(
             .map(|overlay| overlay.monitor_id)
     });
 
+    let window_started = Instant::now();
     let creation_result = (|| -> Result<(), String> {
         for overlay in &overlays {
             let label = format!("region-selector-{}", overlay.monitor_id);
-            let url = WebviewUrl::App(
-                format!("index.html?regionSelectorMonitor={}", overlay.monitor_id).into(),
-            );
-            let window = WebviewWindowBuilder::new(&app, label, url)
-                .title("ToolDock Region Selector")
-                .decorations(false)
-                .always_on_top(true)
-                .skip_taskbar(true)
-                .closable(false)
-                .resizable(false)
-                .shadow(false)
-                .visible(false)
-                .inner_size(overlay.width as f64, overlay.height as f64)
-                .build()
-                .map_err(|error| format!("无法创建区域选择遮罩窗口：{error}"))?;
+            let reused = app.get_webview_window(&label);
+            let window = if let Some(window) = reused {
+                window
+            } else {
+                let url = WebviewUrl::App(
+                    format!("index.html?regionSelectorMonitor={}", overlay.monitor_id).into(),
+                );
+                WebviewWindowBuilder::new(&app, &label, url)
+                    .title("ToolDock Region Selector")
+                    .decorations(false)
+                    .always_on_top(true)
+                    .skip_taskbar(true)
+                    .closable(false)
+                    .resizable(false)
+                    .shadow(false)
+                    .visible(false)
+                    .inner_size(overlay.width as f64, overlay.height as f64)
+                    .build()
+                    .map_err(|error| format!("无法创建区域选择遮罩窗口：{error}"))?
+            };
             window
                 .set_position(PhysicalPosition::new(overlay.origin_x, overlay.origin_y))
                 .map_err(|error| format!("无法定位区域选择遮罩窗口：{error}"))?;
@@ -976,6 +1373,8 @@ async fn open_region_selector(
             window
                 .show()
                 .map_err(|error| format!("无法显示区域选择遮罩窗口：{error}"))?;
+            app.emit_to(&label, "region-selector-overlay-ready", overlay.clone())
+                .map_err(|error| format!("无法刷新区域选择遮罩窗口：{error}"))?;
             if focused_monitor == Some(overlay.monitor_id)
                 || (focused_monitor.is_none() && overlay.is_primary)
             {
@@ -990,9 +1389,18 @@ async fn open_region_selector(
         if let Ok(mut session) = state.0.lock() {
             *session = None;
         }
+        if let Ok(mut assets) = asset_state.0.lock() {
+            assets.clear();
+        }
         return Err(error);
     }
 
+    eprintln!(
+        "[ToolDock] region selector ready: capture+encode={:?}, windows={:?}, total={:?}",
+        window_started.duration_since(open_started),
+        window_started.elapsed(),
+        open_started.elapsed()
+    );
     Ok(())
 }
 
@@ -1018,6 +1426,7 @@ fn finish_region_selector(
     region: Option<CaptureRegion>,
     state: State<'_, RegionSelectorState>,
     capture_state: State<'_, CaptureState>,
+    asset_state: State<'_, OverlayAssetState>,
 ) -> Result<(), String> {
     let mut session = state
         .0
@@ -1083,6 +1492,9 @@ fn finish_region_selector(
     );
 
     close_region_selector_windows(&app);
+    if let Ok(mut assets) = asset_state.0.lock() {
+        assets.clear();
+    }
     if let Some(main_window) = app.get_webview_window("main") {
         let _ = main_window.show();
         let _ = main_window.set_focus();
@@ -1095,7 +1507,7 @@ fn finish_region_selector(
 fn close_color_picker_windows(app: &tauri::AppHandle) {
     for (label, window) in app.webview_windows() {
         if label.starts_with("color-picker-") {
-            let _ = window.close();
+            let _ = window.hide();
         }
     }
 }
@@ -1104,38 +1516,84 @@ fn close_color_picker_windows(app: &tauri::AppHandle) {
 async fn open_color_picker(
     app: tauri::AppHandle,
     state: State<'_, ColorPickerState>,
+    asset_state: State<'_, OverlayAssetState>,
 ) -> Result<(), String> {
+    let open_started = Instant::now();
     close_color_picker_windows(&app);
     state
         .0
         .lock()
         .map_err(|_| "取色器状态不可用".to_string())?
         .clear();
+    asset_state
+        .0
+        .lock()
+        .map_err(|_| "取色器快照状态不可用".to_string())?
+        .clear();
 
     let cursor_position = app.cursor_position().ok();
-    let mut overlays = tauri::async_runtime::spawn_blocking(|| {
-        let monitors = Monitor::all().map_err(|error| format!("无法读取显示器：{error}"))?;
-        monitors
-            .into_iter()
-            .enumerate()
-            .map(|(monitor_id, monitor)| {
-                let width = monitor.width().map_err(|error| error.to_string())?;
-                let height = monitor.height().map_err(|error| error.to_string())?;
-                let image = monitor
-                    .capture_image()
-                    .map_err(|error| format!("无法准备取色器屏幕快照：{error}"))?;
-                Ok(ColorPickerOverlay {
-                    monitor_id,
-                    data_url: encode_image_data_url(&image)?,
-                    width,
-                    height,
-                    origin_x: monitor.x().map_err(|error| error.to_string())?,
-                    origin_y: monitor.y().map_err(|error| error.to_string())?,
-                    is_primary: monitor.is_primary().unwrap_or(false),
-                    initial_position: None,
+    let asset_token = format!(
+        "{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    );
+    let (mut overlays, assets) = tauri::async_runtime::spawn_blocking(move || {
+        let raw_captures = capture_all_monitor_snapshots()?;
+        let mut overlays = thread::scope(|scope| {
+            let handles = raw_captures
+                .into_iter()
+                .map(|snapshot| {
+                    let MonitorSnapshot {
+                        monitor_id,
+                        image,
+                        width,
+                        height,
+                        origin_x,
+                        origin_y,
+                        is_primary,
+                        ..
+                    } = snapshot;
+                    let asset_key = format!("picker-{asset_token}-{monitor_id}.bmp");
+                    scope.spawn(move || {
+                        let bytes = encode_color_picker_bmp(&image)?;
+                        Ok::<_, String>((
+                            ColorPickerOverlay {
+                                monitor_id,
+                                data_url: overlay_asset_url(&asset_key),
+                                width,
+                                height,
+                                origin_x,
+                                origin_y,
+                                is_primary,
+                                initial_position: None,
+                            },
+                            (
+                                asset_key,
+                                OverlayAsset {
+                                    content_type: "image/bmp",
+                                    bytes,
+                                },
+                            ),
+                        ))
+                    })
                 })
-            })
-            .collect::<Result<Vec<_>, String>>()
+                .collect::<Vec<_>>();
+            handles
+                .into_iter()
+                .map(|handle| {
+                    handle
+                        .join()
+                        .map_err(|_| "取色器屏幕快照线程异常退出".to_string())?
+                })
+                .collect::<Result<Vec<_>, String>>()
+        })?;
+        overlays.sort_by_key(|(overlay, _)| overlay.monitor_id);
+        let (overlays, assets): (Vec<ColorPickerOverlay>, Vec<(String, OverlayAsset)>) =
+            overlays.into_iter().unzip();
+        Ok::<_, String>((overlays, assets))
     })
     .await
     .map_err(|error| format!("取色器准备任务失败：{error}"))??;
@@ -1143,6 +1601,11 @@ async fn open_color_picker(
     if overlays.is_empty() {
         return Err("没有可供取色的显示器，请检查屏幕捕获权限".into());
     }
+    asset_state
+        .0
+        .lock()
+        .map_err(|_| "取色器快照状态不可用".to_string())?
+        .extend(assets);
 
     if let Some(position) = cursor_position {
         let cursor_x = position.x.floor() as i32;
@@ -1168,22 +1631,29 @@ async fn open_color_picker(
         );
     }
 
+    let window_started = Instant::now();
     let creation_result = (|| -> Result<(), String> {
         for overlay in &overlays {
             let label = format!("color-picker-{}", overlay.monitor_id);
-            let url =
-                WebviewUrl::App(format!("index.html?pickerMonitor={}", overlay.monitor_id).into());
-            let window = WebviewWindowBuilder::new(&app, label, url)
-                .title("ToolDock Color Picker")
-                .decorations(false)
-                .always_on_top(true)
-                .skip_taskbar(true)
-                .resizable(false)
-                .shadow(false)
-                .visible(false)
-                .inner_size(overlay.width as f64, overlay.height as f64)
-                .build()
-                .map_err(|error| format!("无法创建取色器遮罩窗口：{error}"))?;
+            let reused = app.get_webview_window(&label);
+            let window = if let Some(window) = reused {
+                window
+            } else {
+                let url = WebviewUrl::App(
+                    format!("index.html?pickerMonitor={}", overlay.monitor_id).into(),
+                );
+                WebviewWindowBuilder::new(&app, &label, url)
+                    .title("ToolDock Color Picker")
+                    .decorations(false)
+                    .always_on_top(true)
+                    .skip_taskbar(true)
+                    .resizable(false)
+                    .shadow(false)
+                    .visible(false)
+                    .inner_size(overlay.width as f64, overlay.height as f64)
+                    .build()
+                    .map_err(|error| format!("无法创建取色器遮罩窗口：{error}"))?
+            };
             window
                 .set_position(PhysicalPosition::new(overlay.origin_x, overlay.origin_y))
                 .map_err(|error| format!("无法定位取色器遮罩窗口：{error}"))?;
@@ -1193,6 +1663,8 @@ async fn open_color_picker(
             window
                 .show()
                 .map_err(|error| format!("无法显示取色器遮罩窗口：{error}"))?;
+            app.emit_to(&label, "color-picker-overlay-ready", overlay.clone())
+                .map_err(|error| format!("无法刷新取色器遮罩窗口：{error}"))?;
             if overlay.is_primary {
                 let _ = window.set_focus();
             }
@@ -1206,9 +1678,18 @@ async fn open_color_picker(
         if let Ok(mut stored) = state.0.lock() {
             stored.clear();
         }
+        if let Ok(mut assets) = asset_state.0.lock() {
+            assets.clear();
+        }
         return Err(error);
     }
 
+    eprintln!(
+        "[ToolDock] color picker ready: capture+encode={:?}, windows={:?}, total={:?}",
+        window_started.duration_since(open_started),
+        window_started.elapsed(),
+        open_started.elapsed()
+    );
     Ok(())
 }
 
@@ -1230,6 +1711,7 @@ fn get_color_picker_overlay(
 fn finish_color_picker(
     app: tauri::AppHandle,
     state: State<'_, ColorPickerState>,
+    asset_state: State<'_, OverlayAssetState>,
     sample: Option<ColorSample>,
 ) -> Result<(), String> {
     let clipboard_result = sample
@@ -1250,6 +1732,9 @@ fn finish_color_picker(
         .lock()
         .map_err(|_| "取色器状态不可用".to_string())?
         .clear();
+    if let Ok(mut assets) = asset_state.0.lock() {
+        assets.clear();
+    }
 
     if let Some(main_window) = app.get_webview_window("main") {
         let _ = main_window.show();
@@ -1607,6 +2092,523 @@ fn spawn_ffmpeg(
     Ok((child, stdin, stderr_join))
 }
 
+#[cfg(target_os = "windows")]
+enum WindowsCaptureTarget {
+    Desktop {
+        offset_x: i32,
+        offset_y: i32,
+        width: u32,
+        height: u32,
+    },
+    Window {
+        hwnd: u32,
+    },
+}
+
+#[cfg(target_os = "windows")]
+struct WindowsRecordingInput {
+    target: WindowsCaptureTarget,
+    input_width: u32,
+    input_height: u32,
+}
+
+#[cfg(target_os = "windows")]
+fn prepare_windows_recording_input(
+    source: RecordingSourceConfig,
+) -> Result<WindowsRecordingInput, String> {
+    match source {
+        RecordingSourceConfig::Monitor { monitor_id } => {
+            prepare_windows_monitor_recording_input(monitor_id, None)
+        }
+        RecordingSourceConfig::Region { monitor_id, region } => {
+            prepare_windows_monitor_recording_input(monitor_id, Some(region))
+        }
+        RecordingSourceConfig::Window { window_id } => {
+            let window = selected_window(window_id)?;
+            let first_image = window
+                .capture_image()
+                .map_err(|error| format!("无法捕获所选应用窗口：{error}"))?;
+            let (input_width, input_height) = first_image.dimensions();
+            if input_width < 2 || input_height < 2 {
+                return Err("所选应用窗口尺寸无效".into());
+            }
+            Ok(WindowsRecordingInput {
+                target: WindowsCaptureTarget::Window { hwnd: window_id },
+                input_width,
+                input_height,
+            })
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn prepare_windows_monitor_recording_input(
+    monitor_id: usize,
+    requested_region: Option<CaptureRegion>,
+) -> Result<WindowsRecordingInput, String> {
+    let (monitor, _) = selected_monitor(monitor_id)?;
+    let monitor_width = monitor
+        .width()
+        .map_err(|error| format!("无法读取显示器宽度：{error}"))?;
+    let monitor_height = monitor
+        .height()
+        .map_err(|error| format!("无法读取显示器高度：{error}"))?;
+    let region = requested_region
+        .map(|region| normalize_capture_region(region, monitor_width, monitor_height))
+        .transpose()?;
+    let monitor_x = monitor
+        .x()
+        .map_err(|error| format!("无法读取显示器横坐标：{error}"))?;
+    let monitor_y = monitor
+        .y()
+        .map_err(|error| format!("无法读取显示器纵坐标：{error}"))?;
+    let offset_x = monitor_x + region.as_ref().map(|region| region.x as i32).unwrap_or(0);
+    let offset_y = monitor_y + region.as_ref().map(|region| region.y as i32).unwrap_or(0);
+    let input_width = region
+        .as_ref()
+        .map(|region| region.width)
+        .unwrap_or(monitor_width);
+    let input_height = region
+        .as_ref()
+        .map(|region| region.height)
+        .unwrap_or(monitor_height);
+
+    Ok(WindowsRecordingInput {
+        target: WindowsCaptureTarget::Desktop {
+            offset_x,
+            offset_y,
+            width: input_width,
+            height: input_height,
+        },
+        input_width,
+        input_height,
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn spawn_windows_native_ffmpeg(
+    ffmpeg: &Path,
+    target: &WindowsCaptureTarget,
+    output_width: u32,
+    output_height: u32,
+    fps: u32,
+    bitrate_kbps: u32,
+    audio_enabled: bool,
+    audio_input_id: Option<&str>,
+    preview_width: u32,
+    preview_height: u32,
+    path: &Path,
+) -> Result<(Child, ChildStdin, ChildStdout, JoinHandle<String>), String> {
+    let filter = format!(
+        "scale={output_width}:{output_height}:force_original_aspect_ratio=decrease,pad={output_width}:{output_height}:(ow-iw)/2:(oh-ih)/2"
+    );
+    let mut command = Command::new(ffmpeg);
+    command.args([
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-thread_queue_size",
+        "1024",
+        "-f",
+        "gdigrab",
+        "-draw_mouse",
+        "1",
+        "-framerate",
+        &fps.to_string(),
+        "-rtbufsize",
+        "512M",
+    ]);
+    match target {
+        WindowsCaptureTarget::Desktop {
+            offset_x,
+            offset_y,
+            width,
+            height,
+        } => {
+            command.args([
+                "-offset_x",
+                &offset_x.to_string(),
+                "-offset_y",
+                &offset_y.to_string(),
+                "-video_size",
+                &format!("{width}x{height}"),
+                "-i",
+                "desktop",
+            ]);
+        }
+        WindowsCaptureTarget::Window { hwnd } => {
+            command.args(["-i"]).arg(format!("hwnd=0x{hwnd:x}"));
+        }
+    }
+
+    if audio_enabled {
+        let device = audio_input_id
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| "请选择音频输入设备".to_string())?;
+        command
+            .args(["-thread_queue_size", "512", "-f", "dshow", "-i"])
+            .arg(format!("audio={device}"))
+            .args(["-map", "0:v:0", "-map", "1:a:0"]);
+    } else {
+        command.args(["-map", "0:v:0", "-an"]);
+    }
+
+    command.args([
+        "-vf",
+        &filter,
+        "-r",
+        &fps.to_string(),
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-b:v",
+        &format!("{bitrate_kbps}k"),
+        "-maxrate",
+        &format!("{bitrate_kbps}k"),
+        "-bufsize",
+        &format!("{}k", bitrate_kbps.saturating_mul(2)),
+        "-pix_fmt",
+        "yuv420p",
+        "-movflags",
+        "+faststart",
+    ]);
+    if audio_enabled {
+        command.args([
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-ar",
+            "48000",
+            "-ac",
+            "2",
+            "-shortest",
+        ]);
+    }
+    command
+        .arg(path)
+        .args([
+            "-map",
+            "0:v:0",
+            "-an",
+            "-vf",
+            &format!("fps=4,scale={preview_width}:{preview_height}"),
+            "-pix_fmt",
+            "rgba",
+            "-f",
+            "rawvideo",
+            "pipe:1",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    apply_no_window(&mut command);
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("无法启动 FFmpeg：{error}"))?;
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "无法连接 FFmpeg 控制输入".to_string())?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "无法连接 FFmpeg 预览输出".to_string())?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "无法读取 FFmpeg 错误输出".to_string())?;
+    let stderr_join = thread::spawn(move || {
+        let mut output = String::new();
+        let _ = stderr.read_to_string(&mut output);
+        output
+    });
+    Ok((child, stdin, stdout, stderr_join))
+}
+
+#[cfg(target_os = "windows")]
+fn encode_windows_native_recording(
+    app: tauri::AppHandle,
+    mut child: Child,
+    mut stdin: ChildStdin,
+    mut stdout: ChildStdout,
+    stderr_join: JoinHandle<String>,
+    stop_rx: Receiver<()>,
+    preview_width: u32,
+    preview_height: u32,
+    path: PathBuf,
+    started: Instant,
+) -> Result<RecordingResult, String> {
+    let frame_size = preview_width
+        .checked_mul(preview_height)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| "录屏预览尺寸过大".to_string())? as usize;
+    let (preview_tx, preview_rx) = mpsc::channel();
+    let preview_join = thread::spawn(move || loop {
+        let mut frame = vec![0; frame_size];
+        if stdout.read_exact(&mut frame).is_err() {
+            break;
+        }
+        if preview_tx.send(frame).is_err() {
+            break;
+        }
+    });
+    let mut last_preview_jpeg = None;
+    let mut completed_status = None;
+
+    loop {
+        match stop_rx.try_recv() {
+            Ok(()) | Err(TryRecvError::Disconnected) => break,
+            Err(TryRecvError::Empty) => {}
+        }
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|error| format!("无法读取 FFmpeg 状态：{error}"))?
+        {
+            completed_status = Some(status);
+            break;
+        }
+
+        let mut latest_preview = None;
+        while let Ok(frame) = preview_rx.try_recv() {
+            latest_preview = Some(frame);
+        }
+        if let Some(frame) = latest_preview {
+            if let Ok((preview, jpeg)) =
+                encode_recording_preview(preview_width, preview_height, &frame)
+            {
+                let _ = app.emit("recording-preview", preview);
+                last_preview_jpeg = Some(jpeg);
+            }
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    let status = match completed_status {
+        Some(status) => status,
+        None => {
+            stdin
+                .write_all(b"q\n")
+                .map_err(|error| format!("无法停止 FFmpeg：{error}"))?;
+            let _ = stdin.flush();
+            drop(stdin);
+            child
+                .wait()
+                .map_err(|error| format!("等待 FFmpeg 结束失败：{error}"))?
+        }
+    };
+    let _ = preview_join.join();
+    let ffmpeg_error = stderr_join.join().unwrap_or_default();
+    if !status.success() {
+        return Err(format!(
+            "FFmpeg 编码失败，请检查录制来源、编码器和音频输入设备。{}",
+            if ffmpeg_error.trim().is_empty() {
+                String::new()
+            } else {
+                format!(" {}", ffmpeg_error.trim())
+            }
+        ));
+    }
+    finish_recording_result(path, started.elapsed().as_secs(), last_preview_jpeg)
+}
+
+#[cfg(target_os = "windows")]
+struct WindowsWindowFrameHandler {
+    sender: SyncSender<RgbaImage>,
+    packed_buffer: Vec<u8>,
+}
+
+#[cfg(target_os = "windows")]
+impl GraphicsCaptureApiHandler for WindowsWindowFrameHandler {
+    type Flags = SyncSender<RgbaImage>;
+    type Error = String;
+
+    fn new(context: WindowsCaptureContext<Self::Flags>) -> Result<Self, Self::Error> {
+        Ok(Self {
+            sender: context.flags,
+            packed_buffer: Vec::new(),
+        })
+    }
+
+    fn on_frame_arrived(
+        &mut self,
+        frame: &mut WindowsCaptureFrame,
+        capture_control: InternalCaptureControl,
+    ) -> Result<(), Self::Error> {
+        let width = frame.width();
+        let height = frame.height();
+        let buffer = frame
+            .buffer()
+            .map_err(|error| format!("无法读取 Windows 窗口录制帧：{error}"))?;
+        let pixels = buffer.as_nopadding_buffer(&mut self.packed_buffer);
+        let image = RgbaImage::from_raw(width, height, pixels.to_vec())
+            .ok_or_else(|| "无法创建 Windows 窗口录制帧".to_string())?;
+        match self.sender.try_send(image) {
+            Ok(()) | Err(TrySendError::Full(_)) => Ok(()),
+            Err(TrySendError::Disconnected(_)) => {
+                capture_control.stop();
+                Ok(())
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+type WindowsWindowCaptureControl = CaptureControl<WindowsWindowFrameHandler, String>;
+
+#[cfg(target_os = "windows")]
+fn start_windows_window_capture(
+    window_id: u32,
+) -> Result<(WindowsWindowCaptureControl, Receiver<RgbaImage>), String> {
+    let window = WindowsCaptureWindow::from_raw_hwnd(window_id as usize as *mut std::ffi::c_void);
+    let (sender, receiver) = mpsc::sync_channel(2);
+    let settings = WindowsCaptureSettings::new(
+        window,
+        CursorCaptureSettings::Default,
+        DrawBorderSettings::Default,
+        SecondaryWindowSettings::Default,
+        MinimumUpdateIntervalSettings::Default,
+        DirtyRegionSettings::Default,
+        WindowsCaptureColorFormat::Rgba8,
+        sender,
+    );
+    let control = WindowsWindowFrameHandler::start_free_threaded(settings)
+        .map_err(|error| format!("无法启动 Windows 窗口捕获：{error}"))?;
+    Ok((control, receiver))
+}
+
+#[cfg(target_os = "windows")]
+fn prepare_windows_recording(
+    config: RecordingConfig,
+    app: tauri::AppHandle,
+    ffmpeg: PathBuf,
+) -> Result<(RecordingSession, RecordingStatus), String> {
+    let RecordingConfig {
+        source,
+        width,
+        height,
+        fps,
+        bitrate_kbps,
+        audio_enabled,
+        audio_input_id,
+        output_directory,
+    } = config;
+    let folder = requested_folder(output_directory, default_recording_folder())?;
+    let path = folder.join(format!(
+        "ToolDock-{}.mp4",
+        Local::now().format("%Y%m%d-%H%M%S")
+    ));
+    let (stop_tx, stop_rx) = mpsc::channel();
+    let started = Instant::now();
+    let thread_path = path.clone();
+    let join = match source {
+        RecordingSourceConfig::Window { window_id } => {
+            let window = selected_window(window_id)?;
+            let first_image = window
+                .capture_image()
+                .map_err(|error| format!("无法捕获所选应用窗口：{error}"))?;
+            let (input_width, input_height) = first_image.dimensions();
+            if input_width < 2 || input_height < 2 {
+                return Err("所选应用窗口尺寸无效".into());
+            }
+            let requested_width = width.unwrap_or(input_width).max(2);
+            let requested_height = height.unwrap_or(input_height).max(2);
+            let output_width = requested_width.saturating_sub(requested_width % 2);
+            let output_height = requested_height.saturating_sub(requested_height % 2);
+            let (capture_control, capture_rx) = start_windows_window_capture(window_id)?;
+            let (child, stdin, stderr_join) = match spawn_ffmpeg(
+                &ffmpeg,
+                input_width,
+                input_height,
+                output_width,
+                output_height,
+                fps,
+                bitrate_kbps,
+                audio_enabled,
+                audio_input_id.as_deref(),
+                &path,
+            ) {
+                Ok(process) => process,
+                Err(error) => {
+                    let _ = capture_control.stop();
+                    return Err(error);
+                }
+            };
+            thread::spawn(move || {
+                encode_windows_window_recording(
+                    app,
+                    first_image,
+                    capture_control,
+                    capture_rx,
+                    child,
+                    stdin,
+                    stderr_join,
+                    stop_rx,
+                    fps,
+                    thread_path,
+                    started,
+                )
+            })
+        }
+        source => {
+            let input = prepare_windows_recording_input(source)?;
+            let requested_width = width.unwrap_or(input.input_width).max(2);
+            let requested_height = height.unwrap_or(input.input_height).max(2);
+            let output_width = requested_width.saturating_sub(requested_width % 2);
+            let output_height = requested_height.saturating_sub(requested_height % 2);
+            let preview_scale = (720.0 / input.input_width as f64)
+                .min(405.0 / input.input_height as f64)
+                .min(1.0);
+            let preview_width = ((input.input_width as f64 * preview_scale).round() as u32).max(2);
+            let preview_height =
+                ((input.input_height as f64 * preview_scale).round() as u32).max(2);
+            let (child, stdin, stdout, stderr_join) = spawn_windows_native_ffmpeg(
+                &ffmpeg,
+                &input.target,
+                output_width,
+                output_height,
+                fps,
+                bitrate_kbps,
+                audio_enabled,
+                audio_input_id.as_deref(),
+                preview_width,
+                preview_height,
+                &path,
+            )?;
+            thread::spawn(move || {
+                encode_windows_native_recording(
+                    app,
+                    child,
+                    stdin,
+                    stdout,
+                    stderr_join,
+                    stop_rx,
+                    preview_width,
+                    preview_height,
+                    thread_path,
+                    started,
+                )
+            })
+        }
+    };
+    let path_string = path.to_string_lossy().into_owned();
+    Ok((
+        RecordingSession {
+            stop_tx,
+            join,
+            path: path_string.clone(),
+            started,
+        },
+        RecordingStatus {
+            active: true,
+            path: Some(path_string),
+            elapsed_seconds: 0,
+        },
+    ))
+}
+
 fn normalize_capture_region(
     region: CaptureRegion,
     frame_width: u32,
@@ -1630,6 +2632,7 @@ fn normalize_capture_region(
     })
 }
 
+#[cfg(not(target_os = "windows"))]
 fn crop_frame_raw(frame: &Frame, region: &CaptureRegion) -> Vec<u8> {
     let source_stride = frame.width as usize * 4;
     let row_size = region.width as usize * 4;
@@ -1658,7 +2661,7 @@ fn encode_recording_preview(
         image::imageops::FilterType::Triangle,
     );
     let mut bytes = Cursor::new(Vec::new());
-    image::DynamicImage::ImageRgba8(preview)
+    image::DynamicImage::ImageRgb8(image::DynamicImage::ImageRgba8(preview).to_rgb8())
         .write_to(&mut bytes, image::ImageFormat::Jpeg)
         .map_err(|error| format!("无法编码录屏预览：{error}"))?;
     let jpeg = bytes.into_inner();
@@ -1707,6 +2710,7 @@ fn finish_recording_result(
     })
 }
 
+#[cfg(not(target_os = "windows"))]
 fn encode_monitor_recording(
     app: tauri::AppHandle,
     recorder: VideoRecorder,
@@ -1809,10 +2813,12 @@ fn encode_monitor_recording(
     finish_recording_result(path, started.elapsed().as_secs(), last_preview_jpeg)
 }
 
-fn encode_window_recording(
+#[cfg(target_os = "windows")]
+fn encode_windows_window_recording(
     app: tauri::AppHandle,
-    window: Window,
     first_image: RgbaImage,
+    capture_control: WindowsWindowCaptureControl,
+    capture_rx: Receiver<RgbaImage>,
     mut child: Child,
     mut stdin: ChildStdin,
     stderr_join: JoinHandle<String>,
@@ -1835,20 +2841,22 @@ fn encode_window_recording(
             Err(TryRecvError::Empty) => {}
         }
 
+        while let Ok(image) = capture_rx.try_recv() {
+            current_image = if image.dimensions() == expected_size {
+                image
+            } else {
+                image::imageops::resize(
+                    &image,
+                    expected_size.0,
+                    expected_size.1,
+                    image::imageops::FilterType::Triangle,
+                )
+            };
+        }
+
         let now = Instant::now();
-        if now >= next_frame_at {
-            if let Ok(image) = window.capture_image() {
-                current_image = if image.dimensions() == expected_size {
-                    image
-                } else {
-                    image::imageops::resize(
-                        &image,
-                        expected_size.0,
-                        expected_size.1,
-                        image::imageops::FilterType::Triangle,
-                    )
-                };
-            }
+        let mut catch_up_frames = 0;
+        while now >= next_frame_at && catch_up_frames < fps {
             if let Err(error) = stdin.write_all(current_image.as_raw()) {
                 stream_error = Some(format!("写入窗口录制数据失败：{error}"));
                 break;
@@ -1865,9 +2873,13 @@ fn encode_window_recording(
                 next_preview_at = now + Duration::from_millis(250);
             }
             next_frame_at += frame_interval;
-            if next_frame_at < now {
-                next_frame_at = now + frame_interval;
-            }
+            catch_up_frames += 1;
+        }
+        if stream_error.is_some() {
+            break;
+        }
+        if next_frame_at + Duration::from_secs(1) < now {
+            next_frame_at = now + frame_interval;
         }
 
         thread::sleep(
@@ -1877,6 +2889,119 @@ fn encode_window_recording(
         );
     }
 
+    let capture_error = capture_control.stop().err().map(|error| error.to_string());
+    drop(stdin);
+    let status = child
+        .wait()
+        .map_err(|error| format!("等待 FFmpeg 结束失败：{error}"))?;
+    let ffmpeg_error = stderr_join.join().unwrap_or_default();
+    if let Some(error) = stream_error {
+        return Err(error);
+    }
+    if let Some(error) = capture_error {
+        return Err(format!("停止 Windows 窗口捕获失败：{error}"));
+    }
+    if !status.success() {
+        return Err(format!(
+            "FFmpeg 编码失败，请检查编码器和音频输入设备。{}",
+            if ffmpeg_error.trim().is_empty() {
+                String::new()
+            } else {
+                format!(" {}", ffmpeg_error.trim())
+            }
+        ));
+    }
+    finish_recording_result(path, started.elapsed().as_secs(), last_preview_jpeg)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn encode_window_recording(
+    app: tauri::AppHandle,
+    window: Window,
+    first_image: RgbaImage,
+    mut child: Child,
+    mut stdin: ChildStdin,
+    stderr_join: JoinHandle<String>,
+    stop_rx: Receiver<()>,
+    fps: u32,
+    path: PathBuf,
+    started: Instant,
+) -> Result<RecordingResult, String> {
+    let (capture_tx, capture_rx) = mpsc::sync_channel(2);
+    let (capture_stop_tx, capture_stop_rx) = mpsc::channel();
+    let capture_join = thread::spawn(move || loop {
+        match capture_stop_rx.try_recv() {
+            Ok(()) | Err(TryRecvError::Disconnected) => break,
+            Err(TryRecvError::Empty) => {}
+        }
+        if let Ok(image) = window.capture_image() {
+            let _ = capture_tx.try_send(image);
+        }
+    });
+    let frame_interval = Duration::from_secs_f64(1.0 / fps as f64);
+    let expected_size = first_image.dimensions();
+    let mut current_image = first_image;
+    let mut next_frame_at = Instant::now();
+    let mut next_preview_at = Instant::now();
+    let mut last_preview_jpeg = None;
+    let mut stream_error = None;
+
+    loop {
+        match stop_rx.try_recv() {
+            Ok(()) | Err(TryRecvError::Disconnected) => break,
+            Err(TryRecvError::Empty) => {}
+        }
+
+        while let Ok(image) = capture_rx.try_recv() {
+            current_image = if image.dimensions() == expected_size {
+                image
+            } else {
+                image::imageops::resize(
+                    &image,
+                    expected_size.0,
+                    expected_size.1,
+                    image::imageops::FilterType::Triangle,
+                )
+            };
+        }
+
+        let now = Instant::now();
+        let mut catch_up_frames = 0;
+        while now >= next_frame_at && catch_up_frames < fps {
+            if let Err(error) = stdin.write_all(current_image.as_raw()) {
+                stream_error = Some(format!("写入窗口录制数据失败：{error}"));
+                break;
+            }
+            if now >= next_preview_at {
+                if let Ok((preview, jpeg)) = encode_recording_preview(
+                    current_image.width(),
+                    current_image.height(),
+                    current_image.as_raw(),
+                ) {
+                    let _ = app.emit("recording-preview", preview);
+                    last_preview_jpeg = Some(jpeg);
+                }
+                next_preview_at = now + Duration::from_millis(250);
+            }
+            next_frame_at += frame_interval;
+            catch_up_frames += 1;
+        }
+        if stream_error.is_some() {
+            break;
+        }
+        if next_frame_at + Duration::from_secs(1) < now {
+            next_frame_at = now + frame_interval;
+        }
+
+        thread::sleep(
+            next_frame_at
+                .saturating_duration_since(Instant::now())
+                .min(Duration::from_millis(12)),
+        );
+    }
+
+    let _ = capture_stop_tx.send(());
+    let _ = capture_join.join();
     drop(stdin);
     let status = child
         .wait()
@@ -1898,11 +3023,152 @@ fn encode_window_recording(
     finish_recording_result(path, started.elapsed().as_secs(), last_preview_jpeg)
 }
 
+#[cfg(not(target_os = "windows"))]
+fn encode_monitor_polling_recording(
+    app: tauri::AppHandle,
+    monitor_id: usize,
+    first_image: RgbaImage,
+    region: Option<CaptureRegion>,
+    mut child: Child,
+    mut stdin: ChildStdin,
+    stderr_join: JoinHandle<String>,
+    stop_rx: Receiver<()>,
+    fps: u32,
+    path: PathBuf,
+    started: Instant,
+) -> Result<RecordingResult, String> {
+    let (capture_tx, capture_rx) = mpsc::sync_channel(2);
+    let (capture_stop_tx, capture_stop_rx) = mpsc::channel();
+    let capture_join = thread::spawn(move || {
+        let Ok((monitor, _)) = selected_monitor(monitor_id) else {
+            return;
+        };
+        loop {
+            match capture_stop_rx.try_recv() {
+                Ok(()) | Err(TryRecvError::Disconnected) => break,
+                Err(TryRecvError::Empty) => {}
+            }
+            if let Ok(image) = monitor.capture_image() {
+                let _ = capture_tx.try_send(image);
+            }
+        }
+    });
+    let frame_interval = Duration::from_secs_f64(1.0 / fps as f64);
+    let expected_size = first_image.dimensions();
+    let mut current_image = first_image;
+    let mut next_frame_at = Instant::now();
+    let mut next_preview_at = Instant::now();
+    let mut last_preview_jpeg = None;
+    let mut stream_error = None;
+
+    loop {
+        match stop_rx.try_recv() {
+            Ok(()) | Err(TryRecvError::Disconnected) => break,
+            Err(TryRecvError::Empty) => {}
+        }
+
+        while let Ok(image) = capture_rx.try_recv() {
+            current_image = if image.dimensions() == expected_size {
+                image
+            } else {
+                image::imageops::resize(
+                    &image,
+                    expected_size.0,
+                    expected_size.1,
+                    image::imageops::FilterType::Triangle,
+                )
+            };
+        }
+
+        let now = Instant::now();
+        let mut catch_up_frames = 0;
+        while now >= next_frame_at && catch_up_frames < fps {
+            let cropped;
+            let bytes = if let Some(region) = region.as_ref() {
+                cropped = image::imageops::crop_imm(
+                    &current_image,
+                    region.x,
+                    region.y,
+                    region.width,
+                    region.height,
+                )
+                .to_image();
+                cropped.as_raw()
+            } else {
+                current_image.as_raw()
+            };
+            if let Err(error) = stdin.write_all(bytes) {
+                stream_error = Some(format!("写入屏幕录制数据失败：{error}"));
+                break;
+            }
+            if now >= next_preview_at {
+                let preview_width = region
+                    .as_ref()
+                    .map(|region| region.width)
+                    .unwrap_or(current_image.width());
+                let preview_height = region
+                    .as_ref()
+                    .map(|region| region.height)
+                    .unwrap_or(current_image.height());
+                if let Ok((preview, jpeg)) =
+                    encode_recording_preview(preview_width, preview_height, bytes)
+                {
+                    let _ = app.emit("recording-preview", preview);
+                    last_preview_jpeg = Some(jpeg);
+                }
+                next_preview_at = now + Duration::from_millis(250);
+            }
+            next_frame_at += frame_interval;
+            catch_up_frames += 1;
+        }
+        if stream_error.is_some() {
+            break;
+        }
+        if next_frame_at + Duration::from_secs(1) < now {
+            next_frame_at = now + frame_interval;
+        }
+
+        thread::sleep(
+            next_frame_at
+                .saturating_duration_since(Instant::now())
+                .min(Duration::from_millis(12)),
+        );
+    }
+
+    let _ = capture_stop_tx.send(());
+    let _ = capture_join.join();
+    drop(stdin);
+    let status = child
+        .wait()
+        .map_err(|error| format!("等待 FFmpeg 结束失败：{error}"))?;
+    let ffmpeg_error = stderr_join.join().unwrap_or_default();
+    if let Some(error) = stream_error {
+        return Err(error);
+    }
+    if !status.success() {
+        return Err(format!(
+            "FFmpeg 编码失败，请检查编码器和音频输入设备。{}",
+            if ffmpeg_error.trim().is_empty() {
+                String::new()
+            } else {
+                format!(" {}", ffmpeg_error.trim())
+            }
+        ));
+    }
+    finish_recording_result(path, started.elapsed().as_secs(), last_preview_jpeg)
+}
+
+#[cfg(not(target_os = "windows"))]
 enum PreparedRecordingInput {
     Monitor {
         recorder: VideoRecorder,
         receiver: Receiver<Frame>,
         first_frame: Frame,
+        region: Option<CaptureRegion>,
+    },
+    MonitorPolling {
+        monitor_id: usize,
+        first_image: RgbaImage,
         region: Option<CaptureRegion>,
     },
     Window {
@@ -1911,46 +3177,77 @@ enum PreparedRecordingInput {
     },
 }
 
+#[cfg(not(target_os = "windows"))]
 fn prepare_monitor_recording_input(
     monitor_id: usize,
     requested_region: Option<CaptureRegion>,
 ) -> Result<(PreparedRecordingInput, u32, u32), String> {
     let (monitor, _) = selected_monitor(monitor_id)?;
-    let (recorder, receiver) = monitor
-        .video_recorder()
-        .map_err(|error| format!("无法初始化屏幕录制：{error}"))?;
-    recorder
-        .start()
-        .map_err(|error| format!("无法开始屏幕录制：{error}"))?;
-    let first_frame = receiver
-        .recv_timeout(Duration::from_secs(6))
-        .map_err(|error| {
-            let _ = recorder.stop();
-            format!("等待首帧超时，请检查屏幕录制权限：{error}")
-        })?;
-    let region = match requested_region
-        .map(|region| normalize_capture_region(region, first_frame.width, first_frame.height))
-        .transpose()
-    {
-        Ok(region) => region,
-        Err(error) => {
-            let _ = recorder.stop();
-            return Err(error);
-        }
+    let recorder_error = match monitor.video_recorder() {
+        Ok((recorder, receiver)) => match recorder.start() {
+            Ok(()) => match receiver.recv_timeout(Duration::from_secs(6)) {
+                Ok(first_frame) => {
+                    let region = match requested_region
+                        .clone()
+                        .map(|region| {
+                            normalize_capture_region(region, first_frame.width, first_frame.height)
+                        })
+                        .transpose()
+                    {
+                        Ok(region) => region,
+                        Err(error) => {
+                            let _ = recorder.stop();
+                            return Err(error);
+                        }
+                    };
+                    let input_width = region
+                        .as_ref()
+                        .map(|region| region.width)
+                        .unwrap_or(first_frame.width);
+                    let input_height = region
+                        .as_ref()
+                        .map(|region| region.height)
+                        .unwrap_or(first_frame.height);
+                    return Ok((
+                        PreparedRecordingInput::Monitor {
+                            recorder,
+                            receiver,
+                            first_frame,
+                            region,
+                        },
+                        input_width,
+                        input_height,
+                    ));
+                }
+                Err(error) => {
+                    let _ = recorder.stop();
+                    format!("等待首帧超时，请检查屏幕录制权限：{error}")
+                }
+            },
+            Err(error) => format!("无法开始屏幕录制：{error}"),
+        },
+        Err(error) => format!("无法初始化屏幕录制：{error}"),
     };
+
+    let first_image = monitor
+        .capture_image()
+        .map_err(|fallback_error| format!("{recorder_error}；兼容采集也失败：{fallback_error}"))?;
+    let (frame_width, frame_height) = first_image.dimensions();
+    let region = requested_region
+        .map(|region| normalize_capture_region(region, frame_width, frame_height))
+        .transpose()?;
     let input_width = region
         .as_ref()
         .map(|region| region.width)
-        .unwrap_or(first_frame.width);
+        .unwrap_or(frame_width);
     let input_height = region
         .as_ref()
         .map(|region| region.height)
-        .unwrap_or(first_frame.height);
+        .unwrap_or(frame_height);
     Ok((
-        PreparedRecordingInput::Monitor {
-            recorder,
-            receiver,
-            first_frame,
+        PreparedRecordingInput::MonitorPolling {
+            monitor_id,
+            first_image,
             region,
         },
         input_width,
@@ -1971,116 +3268,142 @@ fn prepare_recording(
     let ffmpeg = find_ffmpeg().ok_or_else(|| {
         "未找到 FFmpeg。请安装 FFmpeg，或通过 TOOLDOCK_FFMPEG 指定可执行文件。".to_string()
     })?;
-    let (input, input_width, input_height) = match config.source {
-        RecordingSourceConfig::Monitor { monitor_id } => {
-            prepare_monitor_recording_input(monitor_id, None)?
-        }
-        RecordingSourceConfig::Region { monitor_id, region } => {
-            prepare_monitor_recording_input(monitor_id, Some(region))?
-        }
-        RecordingSourceConfig::Window { window_id } => {
-            let window = selected_window(window_id)?;
-            let first_image = window
-                .capture_image()
-                .map_err(|error| format!("无法捕获所选应用窗口：{error}"))?;
-            let (input_width, input_height) = first_image.dimensions();
-            if input_width < 2 || input_height < 2 {
-                return Err("所选应用窗口尺寸无效".into());
-            }
-            (
-                PreparedRecordingInput::Window {
-                    window,
-                    first_image,
-                },
-                input_width,
-                input_height,
-            )
-        }
-    };
 
-    let requested_width = config.width.unwrap_or(input_width).max(2);
-    let requested_height = config.height.unwrap_or(input_height).max(2);
-    let output_width = requested_width.saturating_sub(requested_width % 2);
-    let output_height = requested_height.saturating_sub(requested_height % 2);
-    let folder = requested_folder(config.output_directory, default_recording_folder())?;
-    let path = folder.join(format!(
-        "ToolDock-{}.mp4",
-        Local::now().format("%Y%m%d-%H%M%S")
-    ));
-    let (child, stdin, stderr_join) = match spawn_ffmpeg(
-        &ffmpeg,
-        input_width,
-        input_height,
-        output_width,
-        output_height,
-        config.fps,
-        config.bitrate_kbps,
-        config.audio_enabled,
-        config.audio_input_id.as_deref(),
-        &path,
-    ) {
-        Ok(process) => process,
-        Err(error) => {
-            if let PreparedRecordingInput::Monitor { recorder, .. } = &input {
-                let _ = recorder.stop();
+    #[cfg(target_os = "windows")]
+    {
+        return prepare_windows_recording(config, app, ffmpeg);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let (input, input_width, input_height) = match config.source {
+            RecordingSourceConfig::Monitor { monitor_id } => {
+                prepare_monitor_recording_input(monitor_id, None)?
             }
-            return Err(error);
-        }
-    };
-    let (stop_tx, stop_rx) = mpsc::channel();
-    let started = Instant::now();
-    let thread_path = path.clone();
-    let fps = config.fps;
-    let join = thread::spawn(move || match input {
-        PreparedRecordingInput::Monitor {
-            recorder,
-            receiver,
-            first_frame,
-            region,
-        } => encode_monitor_recording(
-            app,
-            recorder,
-            receiver,
-            first_frame,
-            region,
-            child,
-            stdin,
-            stderr_join,
-            stop_rx,
-            fps,
-            thread_path,
-            started,
-        ),
-        PreparedRecordingInput::Window {
-            window,
-            first_image,
-        } => encode_window_recording(
-            app,
-            window,
-            first_image,
-            child,
-            stdin,
-            stderr_join,
-            stop_rx,
-            fps,
-            thread_path,
-            started,
-        ),
-    });
-    let path_string = path.to_string_lossy().into_owned();
-    Ok((
-        RecordingSession {
-            stop_tx,
-            join,
-            path: path_string.clone(),
-            started,
-        },
-        RecordingStatus {
-            active: true,
-            path: Some(path_string),
-            elapsed_seconds: 0,
-        },
-    ))
+            RecordingSourceConfig::Region { monitor_id, region } => {
+                prepare_monitor_recording_input(monitor_id, Some(region))?
+            }
+            RecordingSourceConfig::Window { window_id } => {
+                let window = selected_window(window_id)?;
+                let first_image = window
+                    .capture_image()
+                    .map_err(|error| format!("无法捕获所选应用窗口：{error}"))?;
+                let (input_width, input_height) = first_image.dimensions();
+                if input_width < 2 || input_height < 2 {
+                    return Err("所选应用窗口尺寸无效".into());
+                }
+                (
+                    PreparedRecordingInput::Window {
+                        window,
+                        first_image,
+                    },
+                    input_width,
+                    input_height,
+                )
+            }
+        };
+
+        let requested_width = config.width.unwrap_or(input_width).max(2);
+        let requested_height = config.height.unwrap_or(input_height).max(2);
+        let output_width = requested_width.saturating_sub(requested_width % 2);
+        let output_height = requested_height.saturating_sub(requested_height % 2);
+        let folder = requested_folder(config.output_directory, default_recording_folder())?;
+        let path = folder.join(format!(
+            "ToolDock-{}.mp4",
+            Local::now().format("%Y%m%d-%H%M%S")
+        ));
+        let (child, stdin, stderr_join) = match spawn_ffmpeg(
+            &ffmpeg,
+            input_width,
+            input_height,
+            output_width,
+            output_height,
+            config.fps,
+            config.bitrate_kbps,
+            config.audio_enabled,
+            config.audio_input_id.as_deref(),
+            &path,
+        ) {
+            Ok(process) => process,
+            Err(error) => {
+                if let PreparedRecordingInput::Monitor { recorder, .. } = &input {
+                    let _ = recorder.stop();
+                }
+                return Err(error);
+            }
+        };
+        let (stop_tx, stop_rx) = mpsc::channel();
+        let started = Instant::now();
+        let thread_path = path.clone();
+        let fps = config.fps;
+        let join = thread::spawn(move || match input {
+            PreparedRecordingInput::Monitor {
+                recorder,
+                receiver,
+                first_frame,
+                region,
+            } => encode_monitor_recording(
+                app,
+                recorder,
+                receiver,
+                first_frame,
+                region,
+                child,
+                stdin,
+                stderr_join,
+                stop_rx,
+                fps,
+                thread_path,
+                started,
+            ),
+            PreparedRecordingInput::MonitorPolling {
+                monitor_id,
+                first_image,
+                region,
+            } => encode_monitor_polling_recording(
+                app,
+                monitor_id,
+                first_image,
+                region,
+                child,
+                stdin,
+                stderr_join,
+                stop_rx,
+                fps,
+                thread_path,
+                started,
+            ),
+            PreparedRecordingInput::Window {
+                window,
+                first_image,
+            } => encode_window_recording(
+                app,
+                window,
+                first_image,
+                child,
+                stdin,
+                stderr_join,
+                stop_rx,
+                fps,
+                thread_path,
+                started,
+            ),
+        });
+        let path_string = path.to_string_lossy().into_owned();
+        Ok((
+            RecordingSession {
+                stop_tx,
+                join,
+                path: path_string.clone(),
+                started,
+            },
+            RecordingStatus {
+                active: true,
+                path: Some(path_string),
+                elapsed_seconds: 0,
+            },
+        ))
+    }
 }
 
 #[tauri::command]
@@ -2163,15 +3486,81 @@ fn show_main_window(app: tauri::AppHandle) -> Result<(), String> {
     show_main_window_handle(&app)
 }
 
+#[tauri::command]
+fn copy_file_to_clipboard(
+    path: String,
+    state: State<'_, FileClipboardState>,
+) -> Result<(), String> {
+    let path = PathBuf::from(path);
+    if !path.is_file() {
+        return Err("要复制的文件不存在".into());
+    }
+    let path = path.to_string_lossy().into_owned();
+
+    #[cfg(target_os = "windows")]
+    {
+        let _ = state;
+        let _clipboard = WindowsClipboard::new_attempts(10)
+            .map_err(|error| format!("无法连接系统文件剪贴板：{error}"))?;
+        return FileList
+            .write_clipboard(&[path])
+            .map_err(|error| format!("无法复制录像文件：{error}"));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let mut clipboard = state
+            .0
+            .lock()
+            .map_err(|_| "文件剪贴板状态不可用".to_string())?;
+        if clipboard.is_none() {
+            *clipboard = Some(
+                ClipboardContext::new()
+                    .map_err(|error| format!("无法连接系统文件剪贴板：{error}"))?,
+            );
+        }
+        clipboard
+            .as_mut()
+            .expect("file clipboard was initialized")
+            .set_files(vec![path])
+            .map_err(|error| format!("无法复制录像文件：{error}"))
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .register_uri_scheme_protocol("tooldock-snapshot", |context, request| {
+            let key = request.uri().path().trim_start_matches('/');
+            let asset = context
+                .app_handle()
+                .state::<OverlayAssetState>()
+                .0
+                .lock()
+                .ok()
+                .and_then(|mut assets| assets.remove(key));
+            match asset {
+                Some(asset) => tauri::http::Response::builder()
+                    .header(tauri::http::header::CONTENT_TYPE, asset.content_type)
+                    .header(tauri::http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                    .header(tauri::http::header::CACHE_CONTROL, "no-store")
+                    .body(asset.bytes)
+                    .expect("valid snapshot response"),
+                None => tauri::http::Response::builder()
+                    .status(tauri::http::StatusCode::NOT_FOUND)
+                    .header(tauri::http::header::CONTENT_TYPE, "text/plain")
+                    .body(b"snapshot not found".to_vec())
+                    .expect("valid snapshot error response"),
+            }
+        })
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
         .manage(CaptureState::default())
+        .manage(OverlayAssetState::default())
         .manage(ColorPickerState::default())
         .manage(RegionSelectorState::default())
         .manage(RecordingState::default())
+        .manage(FileClipboardState::default())
         .setup(|app| {
             let settings = read_settings();
             let (show_label, quit_label) = tray_labels(&settings.language);
@@ -2244,6 +3633,7 @@ pub fn run() {
             start_recording,
             recording_status,
             stop_recording,
+            copy_file_to_clipboard,
             show_main_window
         ])
         .run(tauri::generate_context!())
@@ -2252,7 +3642,16 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{RecordingConfig, RecordingSourceConfig};
+    use super::{
+        default_settings, encode_color_picker_bmp, encode_overlay_preview,
+        encode_recording_preview, RecordingConfig, RecordingSourceConfig,
+    };
+    use xcap::image::{Rgba, RgbaImage};
+
+    #[test]
+    fn first_launch_defaults_to_light_theme() {
+        assert_eq!(default_settings().theme, "light");
+    }
 
     #[test]
     fn recording_window_source_accepts_camel_case_window_id() {
@@ -2273,5 +3672,36 @@ mod tests {
             config.source,
             RecordingSourceConfig::Window { window_id: 42 }
         ));
+    }
+
+    #[test]
+    fn recording_preview_encodes_rgba_as_jpeg() {
+        let rgba = vec![128; 16 * 16 * 4];
+        let (preview, jpeg) =
+            encode_recording_preview(16, 16, &rgba).expect("RGBA preview should encode");
+
+        assert_eq!((preview.width, preview.height), (16, 16));
+        assert!(jpeg.starts_with(&[0xff, 0xd8]));
+        assert!(jpeg.ends_with(&[0xff, 0xd9]));
+    }
+
+    #[test]
+    fn color_picker_bmp_preserves_exact_pixel_channels() {
+        let image = RgbaImage::from_pixel(1, 1, Rgba([12, 34, 56, 255]));
+        let bmp = encode_color_picker_bmp(&image).expect("picker BMP should encode");
+
+        assert_eq!(&bmp[..2], b"BM");
+        assert_eq!(i32::from_le_bytes(bmp[18..22].try_into().unwrap()), 1);
+        assert_eq!(i32::from_le_bytes(bmp[22..26].try_into().unwrap()), -1);
+        assert_eq!(&bmp[54..58], &[56, 34, 12, 255]);
+    }
+
+    #[test]
+    fn region_preview_limits_its_largest_dimension() {
+        let image = RgbaImage::from_pixel(2000, 1000, Rgba([10, 20, 30, 255]));
+        let bmp = encode_overlay_preview(&image).expect("region preview should encode");
+
+        assert_eq!(i32::from_le_bytes(bmp[18..22].try_into().unwrap()), 1920);
+        assert_eq!(i32::from_le_bytes(bmp[22..26].try_into().unwrap()), -960);
     }
 }

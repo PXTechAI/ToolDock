@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { Check, RotateCcw, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type {
@@ -25,10 +26,33 @@ export function RegionSelectorOverlay({ monitorId }: { monitorId: number }) {
   const [error, setError] = useState("");
 
   useEffect(() => {
-    invoke<RegionSelectorOverlayData>("get_region_selector_overlay", { monitorId }).then(
-      setOverlay,
-      (reason) => setError(String(reason)),
+    let disposed = false;
+    let unlisten: UnlistenFn | undefined;
+
+    function applyOverlay(next: RegionSelectorOverlayData) {
+      if (disposed || next.monitorId !== monitorId) return;
+      setSelection(null);
+      setDragging(false);
+      setError("");
+      setOverlay(next);
+    }
+
+    void listen<RegionSelectorOverlayData>("region-selector-overlay-ready", (event) => {
+      applyOverlay(event.payload);
+    }).then((cleanup) => {
+      unlisten = cleanup;
+    });
+    void invoke<RegionSelectorOverlayData>("get_region_selector_overlay", { monitorId }).then(
+      applyOverlay,
+      (reason) => {
+        if (!disposed) setError(String(reason));
+      },
     );
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
   }, [monitorId]);
 
   const bounds = useMemo(() => {

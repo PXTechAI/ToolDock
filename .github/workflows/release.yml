@@ -22,6 +22,7 @@ jobs:
   build:
     name: Build ${{ matrix.name }}
     runs-on: ${{ matrix.platform }}
+    environment: release-signing
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -97,11 +98,83 @@ jobs:
         env:
           RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
 
+      - name: Validate Apple signing configuration
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          missing=()
+          for name in \
+            APPLE_CERTIFICATE \
+            APPLE_CERTIFICATE_PASSWORD \
+            APPLE_ID \
+            APPLE_PASSWORD \
+            APPLE_TEAM_ID
+          do
+            if [[ -z "${!name}" ]]; then
+              missing+=("$name")
+            fi
+          done
+
+          if (( ${#missing[@]} > 0 )); then
+            echo "::error::Missing Apple release-signing secrets: ${missing[*]}"
+            exit 1
+          fi
+
+      - name: Import Apple Developer ID certificate
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          certificate_path="$RUNNER_TEMP/tooldock-developer-id.p12"
+          keychain_path="$RUNNER_TEMP/tooldock-signing.keychain-db"
+          keychain_password="$(openssl rand -hex 24)"
+
+          printf '%s' "$APPLE_CERTIFICATE" |
+            openssl base64 -d -A -out "$certificate_path"
+
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security default-keychain -s "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -t 3600 -u "$keychain_path"
+          security import "$certificate_path" \
+            -k "$keychain_path" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s \
+            -k "$keychain_password" \
+            "$keychain_path"
+
+          signing_identity="$(
+            security find-identity -v -p codesigning "$keychain_path" |
+              awk -F'"' '/Developer ID Application/ { print $2; exit }'
+          )"
+          if [[ -z "$signing_identity" ]]; then
+            echo "::error::The imported certificate does not contain a Developer ID Application identity."
+            exit 1
+          fi
+
+          echo "APPLE_SIGNING_IDENTITY=$signing_identity" >> "$GITHUB_ENV"
+          echo "TOOLDOCK_KEYCHAIN_PATH=$keychain_path" >> "$GITHUB_ENV"
+          rm -f "$certificate_path"
+
       - name: Build and upload release assets
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          APPLE_SIGNING_IDENTITY: ${{ runner.os == 'macOS' && '-' || '' }}
+          TOOLDOCK_TARGET_TRIPLE: ${{ matrix.target }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           tagName: ${{ github.event.inputs.tag || github.ref_name }}
           releaseName: ToolDock ${{ github.event.inputs.tag || github.ref_name }}
@@ -115,3 +188,25 @@ jobs:
           retryAttempts: 2
           releaseAssetNamePattern: ToolDock_[version]_[platform]_[arch][setup].[ext]
           args: ${{ matrix.args }}
+
+      - name: Verify macOS signature and notarization
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          app_path="src-tauri/target/${{ matrix.target }}/release/bundle/macos/ToolDock.app"
+          if [[ ! -d "$app_path" ]]; then
+            echo "::error::Signed macOS application was not found at $app_path"
+            exit 1
+          fi
+
+          codesign --verify --deep --strict --verbose=2 "$app_path"
+          spctl --assess --type execute --verbose=2 "$app_path"
+          xcrun stapler validate "$app_path"
+
+      - name: Remove temporary Apple signing keychain
+        if: always() && runner.os == 'macOS'
+        shell: bash
+        run: |
+          if [[ -n "${TOOLDOCK_KEYCHAIN_PATH:-}" ]]; then
+            security delete-keychain "$TOOLDOCK_KEYCHAIN_PATH" || true
+          fi

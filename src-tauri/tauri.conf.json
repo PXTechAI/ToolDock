@@ -29,10 +29,30 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "externalBin": [
+      "binaries/ffmpeg"
+    ],
+    "resources": [
+      "../THIRD_PARTY_NOTICES.md",
+      "binaries/*.LICENSE",
+      "binaries/*.README"
+    ],
     "category": "DeveloperTool",
+    "publisher": "PX Labs",
     "shortDescription": "Color, port, screenshot and string utilities for developers.",
     "longDescription": "ToolDock is a focused cross-platform desktop toolkit for common development tasks.",
     "copyright": "Copyright 2026 PX Labs",
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": [
+          "SimpChinese",
+          "English",
+          "Japanese",
+          "Korean"
+        ]
+      }
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

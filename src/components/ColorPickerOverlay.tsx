@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useEffect, useRef, useState } from "react";
 import type { ColorPickerOverlayData, ColorSample } from "../types";
 
@@ -28,9 +29,33 @@ export function ColorPickerOverlay({ monitorId }: { monitorId: number }) {
   const latestSampleRef = useRef<ColorSample | null>(null);
 
   useEffect(() => {
-    invoke<ColorPickerOverlayData>("get_color_picker_overlay", { monitorId }).then(setOverlay, (reason) => {
-      setError(String(reason));
+    let disposed = false;
+    let unlisten: UnlistenFn | undefined;
+
+    function applyOverlay(next: ColorPickerOverlayData) {
+      if (disposed || next.monitorId !== monitorId) return;
+      latestSampleRef.current = null;
+      setCursor(null);
+      setError("");
+      setOverlay(next);
+    }
+
+    void listen<ColorPickerOverlayData>("color-picker-overlay-ready", (event) => {
+      applyOverlay(event.payload);
+    }).then((cleanup) => {
+      unlisten = cleanup;
     });
+    void invoke<ColorPickerOverlayData>("get_color_picker_overlay", { monitorId }).then(
+      applyOverlay,
+      (reason) => {
+        if (!disposed) setError(String(reason));
+      },
+    );
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
   }, [monitorId]);
 
   useEffect(() => {
@@ -167,6 +192,7 @@ export function ColorPickerOverlay({ monitorId }: { monitorId: number }) {
       <img
         ref={imageRef}
         className="picker-screen-image"
+        crossOrigin="anonymous"
         src={overlay.dataUrl}
         alt=""
         draggable={false}

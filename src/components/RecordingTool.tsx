@@ -3,6 +3,7 @@ import {
   AppWindow,
   Check,
   Circle,
+  ClipboardCopy,
   Copy,
   Crop,
   Film,
@@ -23,6 +24,7 @@ import {
 import {
   getRecordingCapabilities,
   getRecordingStatus,
+  copyLocalFile,
   listAudioInputs,
   listRecordingHistory,
   listCaptureWindows,
@@ -55,6 +57,10 @@ const resolutions = [
 ];
 
 type RecordingSourceMode = "monitor" | "region" | "window";
+
+const CONTEXT_MENU_WIDTH = 178;
+const CONTEXT_MENU_HEIGHT = 148;
+const CONTEXT_MENU_MARGIN = 8;
 
 function formatDuration(seconds: number) {
   if (!seconds) return "--:--";
@@ -198,6 +204,8 @@ export function RecordingTool({
 
   async function start() {
     const selectedResolution = resolutions.find((item) => item.id === resolution);
+    setElapsed(0);
+    setPreview(null);
     setLoading(true);
     setError("");
     onStatus(t("recording.starting"));
@@ -233,8 +241,6 @@ export function RecordingTool({
         audioInputId: audioEnabled ? audioInputId : undefined,
         outputDirectory: settings.recordingDir,
       });
-      setPreview(null);
-      setElapsed(0);
       setActive(true);
       onStatus(t("recording.active"));
     } catch (reason) {
@@ -275,8 +281,7 @@ export function RecordingTool({
   }, [loading, ready, shortcutTrigger]);
 
   const timeText = `${String(Math.floor(elapsed / 60)).padStart(2, "0")}:${String(elapsed % 60).padStart(2, "0")}`;
-  const displayTimeText =
-    !active && lastRecording ? formatDuration(lastRecording.durationSeconds) : timeText;
+  const displayTimeText = timeText;
   const selectedWindow = windows.find((item) => item.id === windowId);
   const sourceLabel =
     sourceMode === "region"
@@ -660,7 +665,23 @@ export function RecordingTool({
                 }}
                 onContextMenu={(event) => {
                   event.preventDefault();
-                  setContextMenu({ path: item.path, x: event.clientX, y: event.clientY });
+                  setContextMenu({
+                    path: item.path,
+                    x: Math.max(
+                      CONTEXT_MENU_MARGIN,
+                      Math.min(
+                        event.clientX,
+                        window.innerWidth - CONTEXT_MENU_WIDTH - CONTEXT_MENU_MARGIN,
+                      ),
+                    ),
+                    y: Math.max(
+                      CONTEXT_MENU_MARGIN,
+                      Math.min(
+                        event.clientY,
+                        window.innerHeight - CONTEXT_MENU_HEIGHT - CONTEXT_MENU_MARGIN,
+                      ),
+                    ),
+                  });
                 }}
                 title={t("recording.play")}
                 key={item.path}
@@ -702,6 +723,20 @@ export function RecordingTool({
           >
             <Play size={15} />
             {t("recording.play")}
+          </button>
+          <button
+            onClick={() => {
+              void copyLocalFile(contextMenu.path)
+                .then(() => onStatus(t("recording.fileCopied")))
+                .catch((reason) => {
+                  setError(String(reason));
+                  onStatus(t("recording.copyFailed"));
+                });
+              setContextMenu(null);
+            }}
+          >
+            <ClipboardCopy size={15} />
+            {t("recording.copyFile")}
           </button>
           <button
             onClick={() => {
