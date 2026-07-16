@@ -1,175 +1,166 @@
 # ToolDock
 
+**A local desktop toolbox for everyday developer work.**
+
 **English** | [简体中文](README.zh-CN.md) | [日本語](README.ja.md)
 
-ToolDock is a local, cross-platform desktop toolbox for repetitive developer tasks. It runs on Windows, macOS, and Linux without requiring an account or background service.
+ToolDock brings color picking, port process management, screenshots, screen recording, and secure string generation into one desktop app. It works on Windows, macOS, and Linux, requires no account, and keeps your working data on your computer.
 
-## Features
+![ToolDock color picker](website/assets/color-picker-light.png)
 
-- **Screen color picker**: Use a cross-display overlay and a single cursor-following magnifier. The selected value is copied automatically. Press `Esc` to cancel.
-- **Port process manager**: Inspect ports, identify owning processes, select multiple entries, and terminate them after confirmation.
-- **Screenshot capture**: Capture a complete display or freely select a region across displays. PNG results are copied to the clipboard and shown in recent history.
-- **Screen recording**: Record a display, selected region, or individual application window with a live preview, configurable encoding, and recording history.
-- **Secure string generator**: Generate strings with preset lengths, hexadecimal values, numbers, symbols, and UUID v4 values.
-- **Appearance and storage settings**: Switch themes from the sidebar, configure media folders and global shortcuts, and optionally close to the system tray.
+## Download
 
-The sidebar also includes optional links to RouteMarket.ai and RouteMarket Tools. They open in the system browser with UTM campaign parameters; ToolDock does not upload screenshots, recordings, colors, or process data when those links are used.
+[**Download the latest ToolDock release**](../../releases/latest)
 
-## Install Or Run Portably?
+Choose the package for your system:
 
-For public GitHub releases, the recommended default is an installer on Windows and macOS, while Linux should provide both installed and portable choices:
-
-| Platform | Package | Recommendation |
+| System | Package | Notes |
 | --- | --- | --- |
-| Windows x64 | NSIS `.exe` | Recommended. Creates normal Start menu and uninstall entries. |
-| macOS Apple Silicon | `.dmg` | Recommended for M1 and newer Macs. |
-| macOS Intel | `.dmg` | Recommended for Intel-based Macs. |
-| Linux x64 | `.AppImage` | Portable option with no installation flow. |
-| Linux x64 | `.deb` | Installed option for Debian and Ubuntu-based systems. |
+| Windows x64 | NSIS `.exe` | Standard installer with Start menu and uninstall entries |
+| macOS Apple Silicon | `.dmg` | For M1 and newer Macs |
+| macOS Intel | `.dmg` | For Intel-based Macs |
+| Linux x64 | `.AppImage` | Portable; no installation required |
+| Debian / Ubuntu x64 | `.deb` | Installs through the system package manager |
 
-This keeps first-time use familiar while still offering a portable Linux build. The first public builds may be unsigned, so users may see an operating-system security warning.
+Early releases may not be code-signed. Your operating system may ask you to confirm that you trust the application before opening it.
 
-## Usage
+## What You Can Do
 
-### Pick A Color
+- **Pick colors anywhere on screen** with a cross-display overlay and cursor-following magnifier. The selected color is copied automatically.
+- **Find processes by port** using individual ports or ranges, then terminate selected processes after confirmation.
+- **Capture screenshots** from a full display or a freely selected region. Images are saved, copied to the clipboard, and added to capture history.
+- **Record your screen** by display, region, or application window with a live preview, configurable resolution, frame rate, bitrate, and optional microphone audio.
+- **Generate secure strings** including alphanumeric values, numbers, HEX strings, symbols, and UUID v4 values.
+- **Work your way** with light and dark themes, four interface languages, configurable fonts, global shortcuts, storage folders, and system tray behavior.
 
-1. Open **Color Picker**.
-2. Select **Pick from screen**.
-3. ToolDock temporarily hides its window and shows a desktop overlay with a cursor-following magnifier.
-4. Click a screen pixel, or press `Esc` to cancel.
-5. The value is copied automatically; HEX and RGB can also be copied again from the result panel.
+<p>
+  <img src="website/assets/ports-light.png" alt="ToolDock port process manager" width="49%">
+  <img src="website/assets/recording-dark.png" alt="ToolDock screen recorder" width="49%">
+</p>
 
-### Inspect And Terminate Port Processes
+## Quick Start
+
+1. Install ToolDock, or launch the Linux AppImage.
+2. Open **Settings** to choose your language, font, screenshot folder, and recording folder.
+3. Select a tool from the sidebar.
+4. Keep ToolDock available from the system tray, or use a global shortcut without opening the main window.
+
+ToolDock supports Simplified Chinese, English, Japanese, and Korean in the application.
+
+## Color Picker
+
+1. Open **Color Picker** and select **Pick from screen**.
+2. ToolDock hides its window and places a dimmed overlay across all displays.
+3. Move the pointer to inspect pixels through the magnifier.
+4. Click to select a color, or press `Esc` to cancel.
+5. The selected value is copied automatically. HEX and RGB values remain available in recent history.
+
+Only one magnifier is shown, following the pointer across multiple displays.
+
+## Port Process Manager
 
 1. Open **Port Processes**.
-2. Enter ports separated by commas or spaces, or use a range such as `8000-8010`.
+2. Enter ports separated by commas or spaces, or enter a range such as `8000-8010`.
 3. Select **Search**.
 4. Review the process name, PID, state, command, and memory usage.
-5. Select one or more processes, then choose **Terminate selected** and confirm.
+5. Select one or more results, choose **Terminate selected**, and confirm.
 
-ToolDock cannot terminate protected or elevated processes unless it is running with matching privileges. Always review the PID before terminating a process.
+Recent port queries are retained between refreshes. Protected or elevated processes can only be terminated when ToolDock has matching privileges. Always verify the PID before terminating a process.
 
-### Capture Screenshots
+## Screenshots
 
 1. Open **Screenshot**.
 2. Choose **Full display** or **Select region**.
-3. Choose the display and an optional delay.
-4. For a region capture, the app hides and overlays every display; drag to select the capture rectangle.
-5. The saved image is copied automatically and can be pasted directly into another application.
-6. Open recent captures from the screenshot history shown below the capture controls.
+3. Select a display and, if needed, a capture delay.
+4. For a region capture, drag across the dimmed desktop overlay to define the area.
+5. The PNG image is saved and copied to the clipboard, ready to paste into another application.
+6. Open previous captures from the history below the capture controls.
 
-The default folder is `Pictures/ToolDock`. Change it from **Settings**.
+Screenshots are saved to `Pictures/ToolDock` by default. You can change the folder in **Settings**.
 
-### Record The Screen
+## Screen Recording
 
-1. Install FFmpeg and ensure `ffmpeg` is available on `PATH`.
+Screen recording requires [FFmpeg](https://ffmpeg.org/).
+
+1. Install FFmpeg and make sure `ffmpeg` is available on `PATH`.
 2. Open **Screen Recording**.
-3. Choose a display, region, or application window, then set the output resolution, frame rate, and bitrate.
-4. Select **Start recording**. The left panel shows the captured image in real time.
-5. Select **Stop and save**. The result appears in recording history below.
+3. Choose a display, selected region, or application window.
+4. Set the output resolution, frame rate, and bitrate.
+5. Enable **Record audio** and choose an input device when microphone or audio-input recording is needed.
+6. Select **Start recording** to view the capture in the live preview.
+7. Select **Stop and save**. The MP4 file appears in recording history and can be played from ToolDock.
 
-The default folder is `Videos/ToolDock`. Change it from **Settings**. If FFmpeg is installed in a custom location, set `TOOLDOCK_FFMPEG` to the full FFmpeg executable path before starting ToolDock.
+Recordings are saved to `Videos/ToolDock` by default. To use FFmpeg from a custom location, set `TOOLDOCK_FFMPEG` to the full executable path before starting ToolDock.
 
-### Generate Strings
+ToolDock searches for FFmpeg in this order:
 
-1. Open **String Generator**.
-2. Choose alphanumeric, letters, numbers, HEX, or UUID v4.
-3. Set the length and count.
-4. Optionally include symbols.
-5. Generate and copy one result or all results.
-
-## Settings
-
-The lower-left theme control switches immediately between dark and light modes. The selected theme persists across restarts.
-
-Open **Settings** to configure:
-
-- Screenshot save folder and history source.
-- Screen recording save folder and history source.
-- Global shortcuts for color picking, region screenshots, and starting or stopping screen recording.
-- Exit on close or hide in the system tray.
-
-Missing folders are created automatically when media is saved.
-
-## Platform Permissions
-
-- **Windows**: WebView2 is required. Terminating elevated processes may require running ToolDock as administrator.
-- **macOS**: Color picking, screenshots, and recording require Screen Recording permission. Color picking may also require Input Monitoring permission.
-- **Linux**: X11 has the broadest capture support. Wayland behavior depends on the compositor and desktop portal. Screen recording also requires working PipeWire support.
-
-## FFmpeg
-
-Screen recording uses an external FFmpeg executable for H.264 encoding. FFmpeg is intentionally not bundled because it substantially increases release size and may require additional licensing review by distributors.
-
-ToolDock searches:
-
-1. `TOOLDOCK_FFMPEG`
+1. The `TOOLDOCK_FFMPEG` environment variable
 2. `ffmpeg` on `PATH`
 3. Common executable locations beside the application
 
-Screenshots, color picking, port management, and string generation work without FFmpeg.
+All other tools work without FFmpeg.
 
-## Development
+## String Generator
 
-Requirements:
+1. Open **String Generator**.
+2. Choose alphanumeric, letters, numbers, HEX, or UUID v4.
+3. Set the length and number of results.
+4. Enable symbols when needed.
+5. Generate and copy one result or all results.
 
-- Node.js 22
-- Rust stable
-- Tauri 2 system prerequisites for your operating system
-- FFmpeg for testing screen recording
+## Settings And Shortcuts
 
-```bash
-npm ci
-npm run desktop:dev
-```
+Open **Settings** to configure:
 
-Run only the interface in browser demo mode:
+- Interface language and font
+- Screenshot and recording folders
+- Global shortcuts
+- Close the app or keep it running in the system tray
 
-```bash
-npm run dev
-```
+Default global shortcuts:
 
-Run all local checks:
+| Action | Windows / Linux | macOS |
+| --- | --- | --- |
+| Pick a color | `Ctrl+Alt+C` | `Command+Option+C` |
+| Capture a region | `Ctrl+Alt+S` | `Command+Option+S` |
+| Start or stop recording | `Ctrl+Alt+R` | `Command+Option+R` |
 
-```bash
-npm run check
-```
+Shortcuts can be changed in **Settings**. Each action must use a different key combination.
 
-Build a desktop package:
+## Platform Permissions
 
-```bash
-npm run desktop:build
-```
+- **Windows:** WebView2 is required. Terminating administrator processes may require running ToolDock as administrator.
+- **macOS:** Color picking, screenshots, and recording require Screen Recording permission. Color picking may also require Input Monitoring permission. Audio recording requires microphone permission.
+- **Linux:** X11 provides the broadest capture support. Wayland behavior depends on the compositor and desktop portal. Recording may require PipeWire and appropriate desktop permissions.
 
-Native packages must be built on their target operating system.
+## Troubleshooting
 
-## Continuous Integration And Releases
+**Screen recording says FFmpeg is missing**
 
-- `.github/workflows/ci.yml` checks versions, builds the frontend, validates Rust formatting, and runs native checks on Windows, macOS, and Linux.
-- `.github/workflows/release.yml` builds Windows NSIS, macOS DMG, Linux AppImage, and Linux DEB packages.
-- `.github/workflows/pages.yml` publishes the multilingual static project website from `website/` to GitHub Pages.
-- Pushing a tag such as `v0.2.0` creates a draft GitHub Release. Review and publish it manually.
+Run `ffmpeg -version` in a terminal. If the command is unavailable, add FFmpeg to `PATH` or set `TOOLDOCK_FFMPEG`, then restart ToolDock.
 
-Before tagging, keep the versions in `package.json`, `src-tauri/tauri.conf.json`, and `src-tauri/Cargo.toml` identical and update `CHANGELOG.md`.
+**A global shortcut does not work**
 
-See [the release guide](docs/RELEASING.md) for details.
+Choose another shortcut in **Settings**. Another application or the operating system may already be using the same combination.
 
-## Project Structure
+**ToolDock cannot terminate a process**
 
-```text
-.
-|-- .github/workflows/   # CI and release automation
-|-- public/              # Static assets
-|-- scripts/             # Repository maintenance scripts
-|-- src/                 # React interface
-|-- src-tauri/           # Rust native layer and Tauri configuration
-|-- website/             # Multilingual GitHub Pages website
-|-- README.zh-CN.md      # Simplified Chinese documentation
-`-- README.ja.md         # Japanese documentation
-```
+The process may be protected or running with higher privileges. Restart ToolDock with matching privileges and verify the PID before trying again.
 
-## Contributing And Security
+**Capture features do not work on macOS or Linux**
 
-Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request. Report security issues privately according to [SECURITY.md](SECURITY.md).
+Check the operating-system screen capture permissions. On Wayland, support can vary by desktop environment and portal configuration.
 
-ToolDock is open source under the [MIT License](LICENSE).
+## Privacy
+
+ToolDock processes screenshots, recordings, colors, process information, and generated strings locally. It does not require an account or upload this data to a ToolDock service.
+
+The sidebar contains optional links to RouteMarket.ai and RouteMarket Tools. These links open in your default browser and include UTM campaign parameters; opening them does not upload data from ToolDock.
+
+## Contributing
+
+Bug reports and pull requests are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) before contributing. Developers who want to build ToolDock from source can find the required commands there and in [the release guide](docs/RELEASING.md).
+
+Please report security issues privately according to [SECURITY.md](SECURITY.md).
+
+ToolDock is released under the [MIT License](LICENSE).
