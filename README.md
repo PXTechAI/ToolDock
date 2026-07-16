@@ -80,25 +80,24 @@ Screenshots are saved to `Pictures/ToolDock` by default. You can change the fold
 
 ## Screen Recording
 
-Screen recording requires [FFmpeg](https://ffmpeg.org/).
+Release builds include a verified FFmpeg sidecar, so users do not need to install FFmpeg separately.
 
-1. Install FFmpeg and make sure `ffmpeg` is available on `PATH`.
-2. Open **Screen Recording**.
-3. Choose a display, selected region, or application window.
-4. Set the output resolution, frame rate, and bitrate.
-5. Enable **Record audio** and choose an input device when microphone or audio-input recording is needed.
-6. Select **Start recording** to view the capture in the live preview.
-7. Select **Stop and save**. The MP4 file appears in recording history and can be played from ToolDock.
+1. Open **Screen Recording**.
+2. Choose a display, selected region, or application window.
+3. Set the output resolution, frame rate, and bitrate.
+4. Enable **Record audio** and choose an input device when microphone or audio-input recording is needed.
+5. Select **Start recording** to view the capture in the live preview.
+6. Select **Stop and save**. The MP4 file appears in recording history and can be played from ToolDock.
 
-Recordings are saved to `Videos/ToolDock` by default. To use FFmpeg from a custom location, set `TOOLDOCK_FFMPEG` to the full executable path before starting ToolDock.
+Recordings are saved to `Videos/ToolDock` by default. Developers can override the bundled FFmpeg by setting `TOOLDOCK_FFMPEG` to a full executable path before starting ToolDock.
 
 ToolDock searches for FFmpeg in this order:
 
 1. The `TOOLDOCK_FFMPEG` environment variable
-2. `ffmpeg` on `PATH`
-3. Common executable locations beside the application
+2. The verified sidecar bundled with ToolDock
+3. `ffmpeg` on `PATH`
 
-All other tools work without FFmpeg.
+FFmpeg is distributed as an independent third-party executable under its own license. See [Third-Party Notices](THIRD_PARTY_NOTICES.md) for build and source information.
 
 ## String Generator
 
@@ -137,7 +136,7 @@ Shortcuts can be changed in **Settings**. Each action must use a different key c
 
 **Screen recording says FFmpeg is missing**
 
-Run `ffmpeg -version` in a terminal. If the command is unavailable, add FFmpeg to `PATH` or set `TOOLDOCK_FFMPEG`, then restart ToolDock.
+Reinstall ToolDock from an official GitHub Release because FFmpeg is included in the package. Developers using a custom build can run `npm run prepare:ffmpeg` or set `TOOLDOCK_FFMPEG`, then restart ToolDock.
 
 **A global shortcut does not work**
 

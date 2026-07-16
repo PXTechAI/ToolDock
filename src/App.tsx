@@ -142,10 +142,10 @@ function App() {
   const [activeTool, setActiveTool] = useState<ToolId>("ports");
   const [status, setStatus] = useState("");
   const [settings, setSettings] = useState<AppSettings>({
-    theme: "dark",
+    theme: "light",
     language: "zh-CN",
-    uiFont: "system",
-    fontScale: 1.1,
+    uiFont: "sans",
+    fontScale: 1.2,
     screenshotDir: "",
     recordingDir: "",
     colorShortcut: "CommandOrControl+Alt+C",
@@ -257,7 +257,7 @@ function App() {
           <img src="/tooldock.svg" alt="" />
           <div>
             <strong>ToolDock</strong>
-            <span>Developer Toolbox</span>
+            <span>One Toolbox</span>
           </div>
         </div>
 

@@ -13,3 +13,4 @@ Thumbs.db
 !.env.example
 .idea
 .vscode
+src-tauri/binaries/ffmpeg-*

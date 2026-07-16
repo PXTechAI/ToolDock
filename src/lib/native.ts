@@ -22,10 +22,10 @@ import type {
 const inTauri = () => "__TAURI_INTERNALS__" in window;
 
 const demoSettings: AppSettings = {
-  theme: "dark",
+  theme: "light",
   language: "zh-CN",
-  uiFont: "system",
-  fontScale: 1.1,
+  uiFont: "sans",
+  fontScale: 1.2,
   screenshotDir: "Pictures/ToolDock",
   recordingDir: "Videos/ToolDock",
   colorShortcut: "CommandOrControl+Alt+C",
@@ -56,6 +56,13 @@ export async function revealLocalPath(path: string): Promise<void> {
     throw new Error("Revealing local files is only available in the desktop app.");
   }
   await revealItemInDir(path);
+}
+
+export async function copyLocalFile(path: string): Promise<void> {
+  if (!inTauri()) {
+    throw new Error("Copying local files is only available in the desktop app.");
+  }
+  await invoke("copy_file_to_clipboard", { path });
 }
 
 const demoProcesses: PortProcess[] = [
@@ -212,7 +219,7 @@ export async function selectDesktopRegion(
       }
     });
     await appWindow.hide();
-    await new Promise((resolve) => window.setTimeout(resolve, 220));
+    await new Promise((resolve) => window.setTimeout(resolve, 40));
     await invoke("open_region_selector", { purpose });
     return await result;
   } finally {
@@ -269,7 +276,7 @@ export async function pickScreenColor(): Promise<ColorSample> {
       }
     });
     await appWindow.hide();
-    await new Promise((resolve) => window.setTimeout(resolve, 220));
+    await new Promise((resolve) => window.setTimeout(resolve, 40));
     await invoke("open_color_picker");
     return await result;
   } finally {
