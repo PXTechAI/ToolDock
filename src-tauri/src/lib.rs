@@ -2632,7 +2632,7 @@ fn normalize_capture_region(
     })
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
 fn crop_frame_raw(frame: &Frame, region: &CaptureRegion) -> Vec<u8> {
     let source_stride = frame.width as usize * 4;
     let row_size = region.width as usize * 4;
