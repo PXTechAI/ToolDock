@@ -6,6 +6,23 @@ The format follows Keep a Changelog, and release versions follow Semantic Versio
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-07-17
+
+### Added
+
+- Windows taskbar system-monitor widget with topmost positioning beside the notification area.
+- Hardware-monitor startup and first-sample diagnostics for troubleshooting sensor access.
+
+### Changed
+
+- Hardware sensor data is stored in the active user's ToolDock data directory with explicit read access for standard users.
+- The installer replaces stale hardware-monitor scheduled tasks before registering and starting the updated task.
+
+### Fixed
+
+- System-monitor widgets remain visible when taskbar mode is selected.
+- Hardware-monitor task failures now include the Windows Task Scheduler error details.
+
 ## [0.1.3] - 2026-07-17
 
 ### Added

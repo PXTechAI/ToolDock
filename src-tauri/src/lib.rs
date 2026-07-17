@@ -39,7 +39,7 @@ use windows::{
     Wdk::System::Threading::{NtQueryInformationProcess, ProcessHandleInformation},
     Win32::{
         Foundation::{
-            CloseHandle, DuplicateHandle, DUPLICATE_SAME_ACCESS, HANDLE,
+            CloseHandle, DuplicateHandle, DUPLICATE_SAME_ACCESS, HANDLE, HWND, RECT,
             STATUS_INFO_LENGTH_MISMATCH,
         },
         Graphics::Gdi::{
@@ -56,7 +56,10 @@ use windows::{
             PROCESS_QUERY_INFORMATION, THREAD_TERMINATE,
         },
         System::IO::CancelSynchronousIo,
-        UI::WindowsAndMessaging::GetDesktopWindow,
+        UI::WindowsAndMessaging::{
+            FindWindowExW, FindWindowW, GetDesktopWindow, GetWindowRect, SetWindowPos,
+            HWND_TOPMOST, SWP_NOACTIVATE,
+        },
     },
 };
 #[cfg(target_os = "windows")]
@@ -1622,7 +1625,7 @@ fn save_settings(
             &settings.system_widget_mode,
             settings.system_widget_metrics.len(),
         )?;
-        if settings.system_widget_enabled && settings.system_widget_mode == "floating" {
+        if settings.system_widget_enabled {
             window
                 .show()
                 .map_err(|error| format!("Unable to show the system widget: {error}"))?;
@@ -1701,17 +1704,116 @@ fn floating_system_widget_width(metric_count: usize) -> u32 {
     CHROME_WIDTH + METRIC_WIDTH * metric_count.clamp(1, 5) as u32
 }
 
+fn taskbar_system_widget_width() -> u32 {
+    124
+}
+
+#[cfg(target_os = "windows")]
+fn windows_widget_handle(window: &tauri::WebviewWindow) -> Result<HWND, String> {
+    let hwnd = window
+        .hwnd()
+        .map_err(|error| format!("Unable to access the system widget window: {error}"))?;
+    Ok(HWND(hwnd.0))
+}
+
+#[cfg(target_os = "windows")]
+fn position_system_widget_on_taskbar(window: &tauri::WebviewWindow) -> Result<(), String> {
+    let hwnd = windows_widget_handle(window)?;
+    let taskbar = unsafe {
+        FindWindowW(
+            windows::core::w!("Shell_TrayWnd"),
+            windows::core::PCWSTR::null(),
+        )
+    }
+    .map_err(|error| format!("Unable to locate the Windows taskbar: {error}"))?;
+    let mut taskbar_rect = RECT::default();
+    unsafe {
+        GetWindowRect(taskbar, &mut taskbar_rect)
+            .map_err(|error| format!("Unable to read the Windows taskbar bounds: {error}"))?;
+    }
+
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let inset = (2.0 * scale).round().max(1.0) as i32;
+    let taskbar_width = (taskbar_rect.right - taskbar_rect.left).max(1);
+    let taskbar_height = (taskbar_rect.bottom - taskbar_rect.top).max(1);
+    let metric_size = (taskbar_system_widget_width() as f64 * scale).round() as i32;
+    let tray_rect = unsafe {
+        FindWindowExW(
+            Some(taskbar),
+            None,
+            windows::core::w!("TrayNotifyWnd"),
+            windows::core::PCWSTR::null(),
+        )
+        .ok()
+        .and_then(|tray| {
+            let mut bounds = RECT::default();
+            GetWindowRect(tray, &mut bounds).ok().map(|_| bounds)
+        })
+    };
+    let (x, y, widget_width, widget_height) = if taskbar_width > taskbar_height {
+        let widget_width = metric_size.min((taskbar_width - inset * 2).max(1));
+        let widget_height = (taskbar_height - inset * 2).max(1);
+        let fallback_x = taskbar_rect.right - widget_width - inset;
+        let x = tray_rect
+            .filter(|bounds| bounds.left > taskbar_rect.left + widget_width)
+            .map(|bounds| bounds.left - widget_width - inset)
+            .unwrap_or(fallback_x)
+            .max(taskbar_rect.left + inset);
+        (x, taskbar_rect.top + inset, widget_width, widget_height)
+    } else {
+        let widget_width = (taskbar_width - inset * 2).max(1);
+        let widget_height = metric_size.min((taskbar_height - inset * 2).max(1));
+        let fallback_y = taskbar_rect.bottom - widget_height - inset;
+        let y = tray_rect
+            .filter(|bounds| bounds.top > taskbar_rect.top + widget_height)
+            .map(|bounds| bounds.top - widget_height - inset)
+            .unwrap_or(fallback_y)
+            .max(taskbar_rect.top + inset);
+        (taskbar_rect.left + inset, y, widget_width, widget_height)
+    };
+
+    unsafe {
+        SetWindowPos(
+            hwnd,
+            Some(HWND_TOPMOST),
+            x,
+            y,
+            widget_width,
+            widget_height,
+            SWP_NOACTIVATE,
+        )
+        .map_err(|error| format!("Unable to position the taskbar widget: {error}"))
+    }
+}
+
 fn configure_system_widget(
     window: &tauri::WebviewWindow,
     mode: &str,
     metric_count: usize,
 ) -> Result<(), String> {
     if mode == "taskbar" {
-        window
-            .hide()
-            .map_err(|error| format!("Unable to hide the taskbar widget window: {error}"))?;
-        return Ok(());
+        #[cfg(target_os = "windows")]
+        {
+            window
+                .set_always_on_top(true)
+                .map_err(|error| format!("Unable to update the taskbar widget: {error}"))?;
+            window
+                .set_ignore_cursor_events(true)
+                .map_err(|error| format!("Unable to configure the taskbar widget: {error}"))?;
+            return position_system_widget_on_taskbar(window);
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            window
+                .set_size(PhysicalSize::new(taskbar_system_widget_width(), 44))
+                .map_err(|error| format!("Unable to resize the taskbar widget: {error}"))?;
+            return position_system_widget(window);
+        }
     }
+    #[cfg(target_os = "windows")]
+    window
+        .set_ignore_cursor_events(false)
+        .map_err(|error| format!("Unable to configure the floating widget: {error}"))?;
     window
         .set_size(PhysicalSize::new(
             floating_system_widget_width(metric_count),
@@ -1744,10 +1846,10 @@ fn show_system_widget(app: tauri::AppHandle) -> Result<(), String> {
         &settings.system_widget_mode,
         settings.system_widget_metrics.len(),
     )?;
+    window
+        .show()
+        .map_err(|error| format!("Unable to show the system widget: {error}"))?;
     if settings.system_widget_mode == "floating" {
-        window
-            .show()
-            .map_err(|error| format!("Unable to show the system widget: {error}"))?;
         window
             .set_focus()
             .map_err(|error| format!("Unable to focus the system widget: {error}"))?;
@@ -1956,21 +2058,13 @@ fn sync_taskbar_widget_state(
         .lock()
         .map_err(|_| "Taskbar widget state is unavailable")?;
     let metrics_changed = taskbar.metrics != settings.system_widget_metrics;
-    taskbar.enabled = settings.system_widget_enabled && settings.system_widget_mode == "taskbar";
+    taskbar.enabled = false;
     taskbar.metrics = settings.system_widget_metrics.clone();
     if metrics_changed || taskbar.current_index >= taskbar.metrics.len() {
         taskbar.current_index = 0;
         taskbar.last_rotation = Instant::now();
     }
-    if taskbar.enabled {
-        Ok(taskbar
-            .metrics
-            .get(taskbar.current_index)
-            .cloned()
-            .unwrap_or_else(|| "cpu".into()))
-    } else {
-        Ok(settings.system_tray_metric.clone())
-    }
+    Ok(settings.system_tray_metric.clone())
 }
 
 fn current_system_tray_metric(state: &SystemMonitorState) -> String {
@@ -5672,8 +5766,9 @@ pub fn run() {
             }
             tray.build(app)?;
             let active_tray_metric = current_system_tray_metric(&app.state::<SystemMonitorState>());
-            update_system_tray(app.handle(), &active_tray_metric, None)
-                .map_err(std::io::Error::other)?;
+            if let Err(error) = update_system_tray(app.handle(), &active_tray_metric, None) {
+                eprintln!("Unable to restore the ToolDock tray icon: {error}");
+            }
             let widget = ensure_system_widget(
                 app.handle(),
                 settings.system_widget_always_on_top,
@@ -5686,7 +5781,7 @@ pub fn run() {
                 settings.system_widget_metrics.len(),
             )
             .map_err(std::io::Error::other)?;
-            if settings.system_widget_enabled && settings.system_widget_mode == "floating" {
+            if settings.system_widget_enabled {
                 widget.show().map_err(std::io::Error::other)?;
             }
             start_hardware_sensor_monitor(app.handle().clone());

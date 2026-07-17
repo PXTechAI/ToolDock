@@ -676,7 +676,24 @@ Section Install
   ${EndIf}
 
   ; Hardware temperature and fan sensors require a privileged helper on Windows.
-  CreateDirectory "$COMMONAPPDATA\ToolDock"
+  CreateDirectory "$APPDATA\ToolDock"
+  nsExec::ExecToStack /OEM '"$SYSDIR\icacls.exe" "$APPDATA\ToolDock" /grant "*S-1-5-32-545:(OI)(CI)RX" /T /C /Q'
+  Pop $0
+  Pop $2
+  ${If} $0 != 0
+    DetailPrint "Unable to grant read access to the ToolDock hardware sensor directory (exit code $0): $2"
+  ${EndIf}
+  ; Stop and replace any older task so it cannot keep running with stale arguments.
+  nsExec::ExecToLog '"$SYSDIR\schtasks.exe" /End /TN "ToolDock Hardware Monitor"'
+  Pop $0
+  Sleep 1000
+  nsExec::ExecToLog '"$SYSDIR\schtasks.exe" /Delete /F /TN "ToolDock Hardware Monitor"'
+  Pop $0
+  Delete "$SYSDIR\$$COMMONAPPDATA\ToolDock\hardware-sensors.json"
+  Delete "$SYSDIR\$$COMMONAPPDATA\ToolDock\hardware-sensors.json.tmp"
+  Delete "$SYSDIR\$$COMMONAPPDATA\ToolDock\hardware-monitor.log"
+  RMDir "$SYSDIR\$$COMMONAPPDATA\ToolDock"
+  RMDir "$SYSDIR\$$COMMONAPPDATA"
   InitPluginsDir
   FileOpen $1 "$PLUGINSDIR\tooldock-hardware-monitor-task.xml" w
   FileWriteUTF16LE /BOM $1 '<?xml version="1.0" encoding="UTF-16"?>$\r$\n'
@@ -684,23 +701,26 @@ Section Install
   FileWriteUTF16LE $1 '  <RegistrationInfo><Description>Collects CPU temperature and fan sensor data for ToolDock.</Description></RegistrationInfo>$\r$\n'
   FileWriteUTF16LE $1 '  <Triggers><BootTrigger><Enabled>true</Enabled></BootTrigger></Triggers>$\r$\n'
   FileWriteUTF16LE $1 '  <Principals><Principal id="Author"><UserId>S-1-5-18</UserId><RunLevel>HighestAvailable</RunLevel></Principal></Principals>$\r$\n'
-  FileWriteUTF16LE $1 '  <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><AllowHardTerminate>true</AllowHardTerminate><StartWhenAvailable>true</StartWhenAvailable><RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable><IdleSettings><StopOnIdleEnd>false</StopOnIdleEnd><RestartOnIdle>false</RestartOnIdle></IdleSettings><AllowStartOnDemand>true</AllowStartOnDemand><Enabled>true</Enabled><Hidden>true</Hidden><RunOnlyIfIdle>false</RunOnlyIfIdle><WakeToRun>false</WakeToRun><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><Priority>7</Priority><RestartOnFailure><Interval>PT5S</Interval><Count>999</Count></RestartOnFailure></Settings>$\r$\n'
-  FileWriteUTF16LE $1 '  <Actions Context="Author"><Exec><Command>$INSTDIR\tooldock-hardware-monitor.exe</Command><Arguments>--output-file "$COMMONAPPDATA\ToolDock\hardware-sensors.json" --interval-ms 2000 --watchdog-timeout-ms 30000</Arguments></Exec></Actions>$\r$\n'
+  FileWriteUTF16LE $1 '  <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><AllowHardTerminate>true</AllowHardTerminate><StartWhenAvailable>true</StartWhenAvailable><RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable><IdleSettings><StopOnIdleEnd>false</StopOnIdleEnd><RestartOnIdle>false</RestartOnIdle></IdleSettings><AllowStartOnDemand>true</AllowStartOnDemand><Enabled>true</Enabled><Hidden>true</Hidden><RunOnlyIfIdle>false</RunOnlyIfIdle><WakeToRun>false</WakeToRun><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><Priority>7</Priority><RestartOnFailure><Interval>PT1M</Interval><Count>999</Count></RestartOnFailure></Settings>$\r$\n'
+  FileWriteUTF16LE $1 '  <Actions Context="Author"><Exec><Command>$INSTDIR\tooldock-hardware-monitor.exe</Command><Arguments>--output-file "$APPDATA\ToolDock\hardware-sensors.json" --interval-ms 2000 --watchdog-timeout-ms 30000</Arguments></Exec></Actions>$\r$\n'
   FileWriteUTF16LE $1 '</Task>$\r$\n'
   FileClose $1
-  nsExec::ExecToLog '"$SYSDIR\schtasks.exe" /Create /F /TN "ToolDock Hardware Monitor" /XML "$PLUGINSDIR\tooldock-hardware-monitor-task.xml"'
+  nsExec::ExecToStack /OEM '"$SYSDIR\schtasks.exe" /Create /F /TN "ToolDock Hardware Monitor" /XML "$PLUGINSDIR\tooldock-hardware-monitor-task.xml"'
   Pop $0
+  Pop $2
   ${If} $0 != 0
     DetailPrint "Unable to register the ToolDock Hardware Monitor task (exit code $0)."
+    DetailPrint "$2"
     ${IfNot} ${Silent}
     ${AndIf} $PassiveMode != 1
-      MessageBox MB_ICONEXCLAMATION|MB_OK "ToolDock could not enable CPU temperature and fan monitoring. Re-run the installer as administrator."
+      MessageBox MB_ICONEXCLAMATION|MB_OK "ToolDock could not enable CPU temperature and fan monitoring.$\r$\n$\r$\nWindows Task Scheduler reported:$\r$\n$2"
     ${EndIf}
-  ${EndIf}
-  nsExec::ExecToLog '"$SYSDIR\schtasks.exe" /Run /TN "ToolDock Hardware Monitor"'
-  Pop $0
-  ${If} $0 != 0
-    DetailPrint "Unable to start the ToolDock Hardware Monitor task (exit code $0)."
+  ${Else}
+    nsExec::ExecToLog '"$SYSDIR\schtasks.exe" /Run /TN "ToolDock Hardware Monitor"'
+    Pop $0
+    ${If} $0 != 0
+      DetailPrint "Unable to start the ToolDock Hardware Monitor task (exit code $0)."
+    ${EndIf}
   ${EndIf}
 
   ; Create file associations
@@ -866,11 +886,13 @@ Section Uninstall
   RMDir "$INSTDIR"
   Delete "$APPDATA\ToolDock\hardware-sensors.json"
   Delete "$APPDATA\ToolDock\hardware-sensors.json.tmp"
+  Delete "$APPDATA\ToolDock\hardware-monitor.log"
   RMDir "$APPDATA\ToolDock"
-  Delete "$COMMONAPPDATA\ToolDock\hardware-sensors.json"
-  Delete "$COMMONAPPDATA\ToolDock\hardware-sensors.json.tmp"
-  Delete "$COMMONAPPDATA\ToolDock\hardware-monitor.log"
-  RMDir "$COMMONAPPDATA\ToolDock"
+  Delete "$SYSDIR\$$COMMONAPPDATA\ToolDock\hardware-sensors.json"
+  Delete "$SYSDIR\$$COMMONAPPDATA\ToolDock\hardware-sensors.json.tmp"
+  Delete "$SYSDIR\$$COMMONAPPDATA\ToolDock\hardware-monitor.log"
+  RMDir "$SYSDIR\$$COMMONAPPDATA\ToolDock"
+  RMDir "$SYSDIR\$$COMMONAPPDATA"
 
   ; Remove shortcuts if not updating
   ${If} $UpdateMode <> 1

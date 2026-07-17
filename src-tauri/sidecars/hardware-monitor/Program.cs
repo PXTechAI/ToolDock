@@ -6,7 +6,8 @@ var intervalMs = ReadIntArgument(args, "--interval-ms", 2_000, 500, 30_000);
 var parentPid = ReadIntArgument(args, "--parent-pid", 0, 0, int.MaxValue);
 var debug = args.Contains("--debug", StringComparer.OrdinalIgnoreCase);
 var once = args.Contains("--once", StringComparer.OrdinalIgnoreCase);
-var outputFile = ReadStringArgument(args, "--output-file");
+var outputFile = ReadStringArgument(args, "--output-file")
+    ?? (once ? null : GetDefaultOutputFile());
 var watchdogTimeoutMs = ReadIntArgument(args, "--watchdog-timeout-ms", 30_000, 5_000, 300_000);
 var errorLogFile = GetErrorLogFile(outputFile);
 
@@ -47,8 +48,15 @@ watchdog.Start();
 
 try
 {
+    WriteErrorLog(
+        errorLogFile,
+        $"Starting hardware monitor (output: {outputFile ?? "stdout"}, arguments: {string.Join(' ', args)}).");
     computer.Open();
+    WriteErrorLog(
+        errorLogFile,
+        $"Hardware monitor opened {computer.Hardware.Count} top-level hardware device(s).");
     Interlocked.Exchange(ref lastSuccessfulSample, Stopwatch.GetTimestamp());
+    var initialSampleLogged = false;
     while (ParentIsRunning(parentPid))
     {
         try
@@ -70,6 +78,13 @@ try
                 .Select(reading => reading.Value)
                 .DefaultIfEmpty()
                 .Max();
+            if (!initialSampleLogged)
+            {
+                WriteErrorLog(
+                    errorLogFile,
+                    $"Initial sample found {temperatures.Count} CPU temperature sensor(s) and {fans.Count} fan sensor(s); selected temperature: {temperature?.ToString() ?? "null"}.");
+                initialSampleLogged = true;
+            }
 
             var json = JsonSerializer.Serialize(new
             {
@@ -235,6 +250,14 @@ static void WriteSensorFile(string path, string json)
     var temporaryPath = $"{path}.tmp";
     File.WriteAllText(temporaryPath, json);
     File.Move(temporaryPath, path, true);
+}
+
+static string? GetDefaultOutputFile()
+{
+    var commonData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+    return string.IsNullOrWhiteSpace(commonData)
+        ? null
+        : Path.Combine(commonData, "ToolDock", "hardware-sensors.json");
 }
 
 static string? GetErrorLogFile(string? outputFile)
