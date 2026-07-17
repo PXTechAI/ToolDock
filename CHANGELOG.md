@@ -6,6 +6,24 @@ The format follows Keep a Changelog, and release versions follow Semantic Versio
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-07-17
+
+### Added
+
+- Folder-based process lookup with direct path entry, folder selection, and persistent query history.
+- Privileged Windows CPU temperature and fan monitoring with automatic watchdog recovery.
+
+### Changed
+
+- Process query tabs stay on one line and remain usable in narrow windows.
+- Screenshot and recording views avoid blocking work while loading thumbnails or checking FFmpeg.
+- Windows helper processes start without flashing command prompt windows.
+
+### Fixed
+
+- Hardware sensor collection automatically restarts if a low-level sensor read stalls.
+- Switching to screenshot, recording, LAN, or string-generator tools no longer pauses while opening a command window.
+
 ### Added
 
 - Cross-platform GitHub Actions CI.

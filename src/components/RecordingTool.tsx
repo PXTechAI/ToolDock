@@ -98,6 +98,8 @@ export function RecordingTool({
   const [audioSource, setAudioSource] = useState<RecordingAudioSource>("none");
   const [audioInputs, setAudioInputs] = useState<AudioInputInfo[]>([]);
   const [audioInputId, setAudioInputId] = useState("");
+  const [audioInputsLoading, setAudioInputsLoading] = useState(false);
+  const [audioInputsLoaded, setAudioInputsLoaded] = useState(false);
   const [capabilities, setCapabilities] = useState<RecordingCapabilities | null>(null);
   const [active, setActive] = useState(false);
   const [elapsed, setElapsed] = useState(0);
@@ -115,7 +117,12 @@ export function RecordingTool({
   const handledShortcut = useRef(0);
 
   async function refreshCapabilities() {
-    setCapabilities(await getRecordingCapabilities());
+    setCapabilities(null);
+    try {
+      setCapabilities(await getRecordingCapabilities());
+    } catch (reason) {
+      setError(String(reason));
+    }
   }
 
   async function refreshWindows() {
@@ -128,40 +135,75 @@ export function RecordingTool({
   }
 
   async function refreshAudioInputs() {
-    const items = await listAudioInputs();
-    setAudioInputs(items);
-    setAudioInputId((current) => {
-      if (current && items.some((item) => item.id === current)) return current;
-      return items.find((item) => item.isDefault)?.id ?? items[0]?.id ?? "";
-    });
+    setAudioInputsLoading(true);
+    try {
+      const items = await listAudioInputs();
+      setAudioInputs(items);
+      setAudioInputId((current) => {
+        if (current && items.some((item) => item.id === current)) return current;
+        return items.find((item) => item.isDefault)?.id ?? items[0]?.id ?? "";
+      });
+    } finally {
+      setAudioInputsLoaded(true);
+      setAudioInputsLoading(false);
+    }
   }
 
   useEffect(() => {
-    Promise.all([
-      listMonitors(),
-      getRecordingCapabilities(),
-      getRecordingStatus(),
-      listCaptureWindows(),
-      listAudioInputs(),
-    ])
-      .then(([items, capability, status, windowItems, audioItems]) => {
+    let disposed = false;
+
+    Promise.all([listMonitors(), getRecordingStatus()])
+      .then(([items, status]) => {
+        if (disposed) return;
         setMonitors(items);
-        setCapabilities(capability);
         setActive(status.active);
         setElapsed(status.elapsedSeconds);
-        setWindows(windowItems);
-        setWindowId(windowItems[0]?.id ?? null);
-        setAudioInputs(audioItems);
-        setAudioInputId(audioItems.find((item) => item.isDefault)?.id ?? audioItems[0]?.id ?? "");
         const primary = items.find((item) => item.isPrimary);
         if (primary) setMonitorId(primary.id);
-        setReady(true);
       })
       .catch((reason) => {
+        if (disposed) return;
         setError(String(reason));
+      })
+      .finally(() => {
+        if (disposed) return;
         setReady(true);
       });
+
+    void getRecordingCapabilities()
+      .then((capability) => {
+        if (!disposed) setCapabilities(capability);
+      })
+      .catch((reason) => {
+        if (!disposed) setError(String(reason));
+      });
+
+    void listCaptureWindows()
+      .then((windowItems) => {
+        if (disposed) return;
+        setWindows(windowItems);
+        setWindowId(windowItems[0]?.id ?? null);
+      })
+      .catch((reason) => {
+        if (!disposed) setError(String(reason));
+      });
+
+    return () => {
+      disposed = true;
+    };
   }, []);
+
+  useEffect(() => {
+    if (
+      audioSource !== "microphone"
+      || !capabilities?.available
+      || audioInputsLoaded
+      || audioInputsLoading
+    ) {
+      return;
+    }
+    void refreshAudioInputs().catch((reason) => setError(String(reason)));
+  }, [audioSource, capabilities?.available, audioInputsLoaded, audioInputsLoading]);
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -277,10 +319,17 @@ export function RecordingTool({
   }
 
   useEffect(() => {
-    if (!ready || loading || shortcutTrigger <= handledShortcut.current) return;
+    if (
+      !ready
+      || !capabilities?.available
+      || loading
+      || shortcutTrigger <= handledShortcut.current
+    ) {
+      return;
+    }
     handledShortcut.current = shortcutTrigger;
     void (active ? stop() : start());
-  }, [loading, ready, shortcutTrigger]);
+  }, [active, capabilities?.available, loading, ready, shortcutTrigger]);
 
   const timeText = `${String(Math.floor(elapsed / 60)).padStart(2, "0")}:${String(elapsed % 60).padStart(2, "0")}`;
   const displayTimeText = timeText;
@@ -535,7 +584,7 @@ export function RecordingTool({
                 </button>
                 <button
                   className={audioSource === "microphone" ? "active" : ""}
-                  disabled={active || audioInputs.length === 0}
+                  disabled={active || !capabilities?.available}
                   onClick={() => setAudioSource("microphone")}
                 >
                   <Mic size={14} />
@@ -557,13 +606,13 @@ export function RecordingTool({
                 <button
                   className="inline-icon-button"
                   title={t("recording.refreshAudio")}
-                  disabled={active}
+                  disabled={active || audioInputsLoading}
                   onClick={(event) => {
                     event.preventDefault();
                     void refreshAudioInputs().catch((reason) => setError(String(reason)));
                   }}
                 >
-                  <RefreshCw size={13} />
+                  <RefreshCw className={audioInputsLoading ? "spin" : undefined} size={13} />
                 </button>
               </span>
               <SelectMenu
@@ -572,7 +621,9 @@ export function RecordingTool({
                 icon={<Mic size={17} />}
                 disabled={active || audioInputs.length === 0}
                 options={
-                  audioInputs.length === 0
+                  audioInputsLoading
+                    ? [{ value: "", label: t("recording.processing") }]
+                    : audioInputs.length === 0
                     ? [{ value: "", label: t("recording.noAudioDevices") }]
                     : audioInputs.map((item) => ({
                         value: item.id,
@@ -598,7 +649,7 @@ export function RecordingTool({
               <small title={capabilities?.ffmpegPath}>
                 {capabilities?.available
                   ? t("recording.ffmpegReady")
-                  : ready
+                  : capabilities
                     ? t("recording.ffmpegMissing")
                     : t("recording.detectingFfmpeg")}
               </small>

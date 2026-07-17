@@ -7,6 +7,8 @@ var parentPid = ReadIntArgument(args, "--parent-pid", 0, 0, int.MaxValue);
 var debug = args.Contains("--debug", StringComparer.OrdinalIgnoreCase);
 var once = args.Contains("--once", StringComparer.OrdinalIgnoreCase);
 var outputFile = ReadStringArgument(args, "--output-file");
+var watchdogTimeoutMs = ReadIntArgument(args, "--watchdog-timeout-ms", 30_000, 5_000, 300_000);
+var errorLogFile = GetErrorLogFile(outputFile);
 
 var computer = new Computer
 {
@@ -19,43 +21,80 @@ var computer = new Computer
     IsStorageEnabled = false,
 };
 
-computer.Open();
+long lastSuccessfulSample = Stopwatch.GetTimestamp();
+using var watchdogStopped = new ManualResetEventSlim(false);
+var watchdog = new Thread(() =>
+{
+    while (!watchdogStopped.Wait(1_000))
+    {
+        var elapsed = Stopwatch.GetElapsedTime(Interlocked.Read(ref lastSuccessfulSample));
+        if (elapsed.TotalMilliseconds < watchdogTimeoutMs)
+        {
+            continue;
+        }
+
+        WriteErrorLog(
+            errorLogFile,
+            $"Sensor collection made no progress for {Math.Round(elapsed.TotalSeconds)} seconds. Restarting.");
+        Environment.Exit(2);
+    }
+})
+{
+    IsBackground = true,
+    Name = "ToolDock hardware monitor watchdog",
+};
+watchdog.Start();
+
 try
 {
+    computer.Open();
+    Interlocked.Exchange(ref lastSuccessfulSample, Stopwatch.GetTimestamp());
     while (ParentIsRunning(parentPid))
     {
-        var temperatures = new List<SensorReading>();
-        var fans = new List<SensorReading>();
-        foreach (var hardware in computer.Hardware)
+        try
         {
-            if (debug)
+            var temperatures = new List<SensorReading>();
+            var fans = new List<SensorReading>();
+            foreach (var hardware in computer.Hardware)
             {
-                DumpHardware(hardware, 0);
+                if (debug)
+                {
+                    DumpHardware(hardware, 0);
+                }
+                CollectSensors(hardware, temperatures, fans, hardware.HardwareType == HardwareType.Cpu);
             }
-            CollectSensors(hardware, temperatures, fans, hardware.HardwareType == HardwareType.Cpu);
-        }
 
-        var temperature = SelectCpuTemperature(temperatures);
-        var fanRpm = fans
-            .Where(reading => reading.Value > 0)
-            .Select(reading => reading.Value)
-            .DefaultIfEmpty()
-            .Max();
+            var temperature = SelectCpuTemperature(temperatures);
+            var fanRpm = fans
+                .Where(reading => reading.Value > 0)
+                .Select(reading => reading.Value)
+                .DefaultIfEmpty()
+                .Max();
 
-        var json = JsonSerializer.Serialize(new
-        {
-            cpuTemperatureC = temperature,
-            fanRpm = fanRpm > 0 ? (uint?)Math.Round(fanRpm) : null,
-            timestampMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-        });
-        if (string.IsNullOrWhiteSpace(outputFile))
-        {
-            Console.WriteLine(json);
-            Console.Out.Flush();
+            var json = JsonSerializer.Serialize(new
+            {
+                cpuTemperatureC = temperature,
+                fanRpm = fanRpm > 0 ? (uint?)Math.Round(fanRpm) : null,
+                timestampMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            });
+            if (string.IsNullOrWhiteSpace(outputFile))
+            {
+                Console.WriteLine(json);
+                Console.Out.Flush();
+            }
+            else
+            {
+                WriteSensorFile(outputFile, json);
+            }
+            Interlocked.Exchange(ref lastSuccessfulSample, Stopwatch.GetTimestamp());
         }
-        else
+        catch (Exception error)
         {
-            WriteSensorFile(outputFile, json);
+            WriteErrorLog(errorLogFile, error.ToString());
+            if (once)
+            {
+                Environment.ExitCode = 1;
+            }
         }
         if (once)
         {
@@ -64,9 +103,22 @@ try
         Thread.Sleep(intervalMs);
     }
 }
+catch (Exception error)
+{
+    WriteErrorLog(errorLogFile, error.ToString());
+    Environment.ExitCode = 1;
+}
 finally
 {
-    computer.Close();
+    watchdogStopped.Set();
+    try
+    {
+        computer.Close();
+    }
+    catch (Exception error)
+    {
+        WriteErrorLog(errorLogFile, error.ToString());
+    }
 }
 
 static void CollectSensors(
@@ -183,6 +235,41 @@ static void WriteSensorFile(string path, string json)
     var temporaryPath = $"{path}.tmp";
     File.WriteAllText(temporaryPath, json);
     File.Move(temporaryPath, path, true);
+}
+
+static string? GetErrorLogFile(string? outputFile)
+{
+    if (string.IsNullOrWhiteSpace(outputFile))
+    {
+        return null;
+    }
+    var directory = Path.GetDirectoryName(outputFile);
+    return string.IsNullOrWhiteSpace(directory) ? null : Path.Combine(directory, "hardware-monitor.log");
+}
+
+static void WriteErrorLog(string? path, string message)
+{
+    if (string.IsNullOrWhiteSpace(path))
+    {
+        return;
+    }
+    try
+    {
+        var directory = Path.GetDirectoryName(path);
+        if (!string.IsNullOrWhiteSpace(directory))
+        {
+            Directory.CreateDirectory(directory);
+        }
+        if (File.Exists(path) && new FileInfo(path).Length > 64 * 1024)
+        {
+            File.WriteAllText(path, string.Empty);
+        }
+        File.AppendAllText(path, $"{DateTimeOffset.Now:O} {message}{Environment.NewLine}");
+    }
+    catch
+    {
+        // Logging must never stop sensor collection or the watchdog.
+    }
 }
 
 static bool ParentIsRunning(int parentPid)

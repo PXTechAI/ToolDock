@@ -354,6 +354,14 @@ button:disabled {
 .process-query-modes {
   grid-column: 1 / -1;
   justify-self: start;
+  grid-template-columns: repeat(4, max-content);
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.process-query-modes button {
+  padding-inline: 12px;
+  white-space: nowrap;
 }
 
 .inline-browse-button {

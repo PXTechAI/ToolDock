@@ -128,6 +128,14 @@ export async function inspectPorts(ports: number[]): Promise<PortProcess[]> {
   return invoke<PortProcess[]>("inspect_ports", { ports });
 }
 
+export async function inspectFolderProcesses(folderPath: string): Promise<PortProcess[]> {
+  if (!inTauri()) {
+    await new Promise((resolve) => window.setTimeout(resolve, 420));
+    return demoProcesses.slice(0, 1).map((process) => ({ ...process, state: "OPEN" }));
+  }
+  return invoke<PortProcess[]>("inspect_folder_processes", { folderPath });
+}
+
 export async function killProcesses(pids: number[]): Promise<KillResult[]> {
   if (!inTauri()) {
     await new Promise((resolve) => window.setTimeout(resolve, 380));
@@ -348,6 +356,11 @@ export async function listScreenshotHistory(directory?: string): Promise<Screens
   return invoke<ScreenshotResult[]>("list_screenshot_history", {
     directory: directory || null,
   });
+}
+
+export async function loadScreenshotPreview(path: string): Promise<string> {
+  if (!inTauri()) return "";
+  return invoke<string>("load_screenshot_preview", { path });
 }
 
 export async function pickScreenColor(): Promise<ColorSample> {

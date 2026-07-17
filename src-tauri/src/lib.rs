@@ -7,6 +7,8 @@ use clipboard_rs::{Clipboard as _, ClipboardContext};
 use clipboard_win::{formats::FileList, Clipboard as WindowsClipboard, Setter};
 use netstat2::{get_sockets_info, AddressFamilyFlags, ProtocolFlags, ProtocolSocketInfo, TcpState};
 use serde::{Deserialize, Serialize};
+#[cfg(target_os = "windows")]
+use std::os::windows::{ffi::OsStrExt, io::AsRawHandle};
 use std::{
     borrow::Cow,
     collections::{HashMap, HashSet, VecDeque},
@@ -32,12 +34,30 @@ use tauri::{
     WindowEvent,
 };
 #[cfg(target_os = "windows")]
-use windows::Win32::{
-    Graphics::Gdi::{
-        BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits,
-        GetWindowDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, SRCCOPY,
+use windows::{
+    core::PCWSTR,
+    Wdk::System::Threading::{NtQueryInformationProcess, ProcessHandleInformation},
+    Win32::{
+        Foundation::{
+            CloseHandle, DuplicateHandle, DUPLICATE_SAME_ACCESS, HANDLE,
+            STATUS_INFO_LENGTH_MISMATCH,
+        },
+        Graphics::Gdi::{
+            BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits,
+            GetWindowDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, SRCCOPY,
+        },
+        Storage::FileSystem::{
+            CreateFileW, GetFileInformationByHandle, GetFileType, BY_HANDLE_FILE_INFORMATION,
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+            FILE_SHARE_WRITE, FILE_TYPE_DISK, OPEN_EXISTING,
+        },
+        System::Threading::{
+            GetCurrentProcess, GetCurrentThreadId, OpenProcess, OpenThread, PROCESS_DUP_HANDLE,
+            PROCESS_QUERY_INFORMATION, THREAD_TERMINATE,
+        },
+        System::IO::CancelSynchronousIo,
+        UI::WindowsAndMessaging::GetDesktopWindow,
     },
-    UI::WindowsAndMessaging::GetDesktopWindow,
 };
 #[cfg(target_os = "windows")]
 use windows_capture::{
@@ -57,7 +77,7 @@ use windows_capture::{
     window::Window as WindowsCaptureWindow,
 };
 use xcap::{
-    image::{self, GenericImageView, RgbaImage},
+    image::{self, RgbaImage},
     Monitor, Window,
 };
 #[cfg(target_os = "linux")]
@@ -83,6 +103,26 @@ struct PortProcess {
     executable: String,
     command: String,
     memory_bytes: u64,
+}
+
+#[cfg(target_os = "windows")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct SystemHandleEntry {
+    handle_value: usize,
+    handle_count: usize,
+    pointer_count: usize,
+    granted_access: u32,
+    object_type_index: u32,
+    handle_attributes: u32,
+    reserved: u32,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct FileIdentity {
+    volume_serial_number: u32,
+    file_index: u64,
 }
 
 #[derive(Serialize)]
@@ -632,6 +672,303 @@ fn tcp_state_label(state: TcpState) -> String {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn query_process_handles(process_handle: HANDLE) -> Result<Vec<SystemHandleEntry>, String> {
+    const MAX_SNAPSHOT_BYTES: usize = 8 * 1024 * 1024;
+    let mut capacity: usize = 64 * 1024;
+    loop {
+        let word_size = std::mem::size_of::<usize>();
+        let mut buffer = vec![0usize; capacity.div_ceil(word_size)];
+        let mut required = 0u32;
+        let status = unsafe {
+            NtQueryInformationProcess(
+                process_handle,
+                ProcessHandleInformation,
+                buffer.as_mut_ptr().cast(),
+                (buffer.len() * word_size) as u32,
+                &mut required,
+            )
+        };
+
+        if status == STATUS_INFO_LENGTH_MISMATCH {
+            let next_capacity = (required as usize).max(capacity * 2);
+            if next_capacity > MAX_SNAPSHOT_BYTES {
+                return Err("Process has too many handles to scan safely".into());
+            }
+            capacity = next_capacity;
+            continue;
+        }
+        if status.0 < 0 {
+            return Err(format!("NTSTATUS 0x{:08X}", status.0 as u32));
+        }
+
+        let count = buffer[0];
+        let header_size = word_size * 2;
+        let entry_size = std::mem::size_of::<SystemHandleEntry>();
+        let available = (buffer.len() * word_size).saturating_sub(header_size) / entry_size;
+        if count > available {
+            return Err("Windows returned an invalid process handle snapshot".into());
+        }
+
+        let entries = unsafe {
+            std::slice::from_raw_parts(
+                (buffer.as_ptr() as *const u8)
+                    .add(header_size)
+                    .cast::<SystemHandleEntry>(),
+                count,
+            )
+        };
+        return Ok(entries.to_vec());
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_file_type_index() -> Result<u32, String> {
+    let marker_path =
+        std::env::current_exe().map_err(|error| format!("Unable to locate ToolDock: {error}"))?;
+    let marker = fs::File::open(marker_path)
+        .map_err(|error| format!("Unable to prepare the handle scan: {error}"))?;
+    let marker_handle = marker.as_raw_handle() as usize;
+    query_process_handles(unsafe { GetCurrentProcess() })?
+        .into_iter()
+        .find(|entry| entry.handle_value == marker_handle)
+        .map(|entry| entry.object_type_index)
+        .ok_or_else(|| "Unable to identify Windows file handles".into())
+}
+
+#[cfg(target_os = "windows")]
+fn file_identity_from_path(path: &Path) -> Option<FileIdentity> {
+    let wide_path = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let handle = unsafe {
+        CreateFileW(
+            PCWSTR::from_raw(wide_path.as_ptr()),
+            FILE_READ_ATTRIBUTES.0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            None,
+        )
+    }
+    .ok()?;
+    let identity = file_identity_from_handle(handle);
+    let _ = unsafe { CloseHandle(handle) };
+    identity
+}
+
+#[cfg(target_os = "windows")]
+fn collect_folder_file_identities(folder: &Path) -> Result<HashSet<FileIdentity>, String> {
+    let root = fs::canonicalize(folder)
+        .map_err(|error| format!("Unable to resolve the selected folder: {error}"))?;
+    let mut identities = HashSet::new();
+    let mut pending = vec![root];
+
+    while let Some(path) = pending.pop() {
+        let Ok(metadata) = fs::metadata(&path) else {
+            continue;
+        };
+        if let Some(identity) = file_identity_from_path(&path) {
+            identities.insert(identity);
+        }
+        if !metadata.is_dir() {
+            continue;
+        }
+
+        let Ok(entries) = fs::read_dir(&path) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if !file_type.is_symlink() {
+                pending.push(entry.path());
+            }
+        }
+    }
+
+    if identities.is_empty() {
+        return Err("Unable to read the selected folder".into());
+    }
+    Ok(identities)
+}
+
+#[cfg(target_os = "windows")]
+fn file_identity_from_handle(handle: HANDLE) -> Option<FileIdentity> {
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    unsafe { GetFileInformationByHandle(handle, &mut information) }.ok()?;
+    Some(FileIdentity {
+        volume_serial_number: information.dwVolumeSerialNumber,
+        file_index: ((information.nFileIndexHigh as u64) << 32) | information.nFileIndexLow as u64,
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn process_uses_folder(
+    pid: u32,
+    file_type_index: u32,
+    target_identities: &HashSet<FileIdentity>,
+    cancelled: &AtomicBool,
+) -> bool {
+    let current_process = unsafe { GetCurrentProcess() };
+    let Ok(process_handle) =
+        (unsafe { OpenProcess(PROCESS_DUP_HANDLE | PROCESS_QUERY_INFORMATION, false, pid) })
+    else {
+        return false;
+    };
+    let process_handles = match query_process_handles(process_handle) {
+        Ok(handles) => handles,
+        Err(_) => {
+            let _ = unsafe { CloseHandle(process_handle) };
+            return false;
+        }
+    };
+
+    let mut matched = false;
+    for entry in process_handles {
+        if cancelled.load(Ordering::Relaxed) {
+            break;
+        }
+        if entry.object_type_index != file_type_index || entry.granted_access == 0x0012_019f {
+            continue;
+        }
+        let mut duplicate = HANDLE(std::ptr::null_mut());
+        let duplicated = unsafe {
+            DuplicateHandle(
+                process_handle,
+                HANDLE(entry.handle_value as *mut std::ffi::c_void),
+                current_process,
+                &mut duplicate,
+                0,
+                false,
+                DUPLICATE_SAME_ACCESS,
+            )
+        };
+        if duplicated.is_err() {
+            continue;
+        }
+
+        let identity = if unsafe { GetFileType(duplicate) } == FILE_TYPE_DISK {
+            file_identity_from_handle(duplicate)
+        } else {
+            None
+        };
+        let _ = unsafe { CloseHandle(duplicate) };
+        if identity.is_some_and(|identity| target_identities.contains(&identity)) {
+            matched = true;
+            break;
+        }
+    }
+    let _ = unsafe { CloseHandle(process_handle) };
+    matched
+}
+
+#[cfg(target_os = "windows")]
+fn process_uses_folder_with_timeout(
+    pid: u32,
+    file_type_index: u32,
+    target_identities: Arc<HashSet<FileIdentity>>,
+) -> bool {
+    const PROCESS_SCAN_TIMEOUT: Duration = Duration::from_millis(400);
+    const CANCELLATION_GRACE: Duration = Duration::from_millis(150);
+
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let worker_cancelled = Arc::clone(&cancelled);
+    let (thread_id_tx, thread_id_rx) = mpsc::sync_channel(1);
+    let (result_tx, result_rx) = mpsc::sync_channel(1);
+    let worker = thread::spawn(move || {
+        let _ = thread_id_tx.send(unsafe { GetCurrentThreadId() });
+        let matched = process_uses_folder(
+            pid,
+            file_type_index,
+            target_identities.as_ref(),
+            worker_cancelled.as_ref(),
+        );
+        let _ = result_tx.send(matched);
+    });
+
+    let Ok(thread_id) = thread_id_rx.recv_timeout(CANCELLATION_GRACE) else {
+        cancelled.store(true, Ordering::Relaxed);
+        return false;
+    };
+    if let Ok(matched) = result_rx.recv_timeout(PROCESS_SCAN_TIMEOUT) {
+        let _ = worker.join();
+        return matched;
+    }
+
+    cancelled.store(true, Ordering::Relaxed);
+    if let Ok(thread_handle) = unsafe { OpenThread(THREAD_TERMINATE, false, thread_id) } {
+        let _ = unsafe { CancelSynchronousIo(thread_handle) };
+        let _ = unsafe { CloseHandle(thread_handle) };
+    }
+    let matched = result_rx.recv_timeout(CANCELLATION_GRACE).unwrap_or(false);
+    if worker.is_finished() {
+        let _ = worker.join();
+    }
+    matched
+}
+
+#[cfg(target_os = "windows")]
+fn folder_process_ids_for_pids(
+    folder: &Path,
+    process_ids: impl IntoIterator<Item = u32>,
+) -> Result<HashSet<u32>, String> {
+    let file_type_index = windows_file_type_index()?;
+    let target_identities = Arc::new(collect_folder_file_identities(folder)?);
+    let mut matches = HashSet::new();
+    for pid in process_ids {
+        if pid != 0
+            && process_uses_folder_with_timeout(
+                pid,
+                file_type_index,
+                Arc::clone(&target_identities),
+            )
+        {
+            matches.insert(pid);
+        }
+    }
+    Ok(matches)
+}
+
+#[cfg(target_os = "windows")]
+fn folder_process_ids(folder: &Path) -> Result<HashSet<u32>, String> {
+    let system = System::new_all();
+    folder_process_ids_for_pids(folder, system.processes().keys().map(|pid| pid.as_u32()))
+}
+
+fn socket_map_by_process() -> HashMap<u32, Vec<(u16, String, String)>> {
+    let af_flags = AddressFamilyFlags::IPV4 | AddressFamilyFlags::IPV6;
+    let proto_flags = ProtocolFlags::TCP | ProtocolFlags::UDP;
+    let Ok(sockets) = get_sockets_info(af_flags, proto_flags) else {
+        return HashMap::new();
+    };
+
+    let mut socket_map: HashMap<u32, Vec<(u16, String, String)>> = HashMap::new();
+    for socket in sockets {
+        let (port, protocol, state) = match socket.protocol_socket_info {
+            ProtocolSocketInfo::Tcp(tcp) => (
+                tcp.local_port,
+                "TCP".to_string(),
+                tcp_state_label(tcp.state),
+            ),
+            ProtocolSocketInfo::Udp(udp) => {
+                (udp.local_port, "UDP".to_string(), "BOUND".to_string())
+            }
+        };
+        for pid in socket.associated_pids {
+            socket_map
+                .entry(pid)
+                .or_default()
+                .push((port, protocol.clone(), state.clone()));
+        }
+    }
+    socket_map
+}
+
 #[tauri::command]
 async fn inspect_ports(ports: Vec<u16>) -> Result<Vec<PortProcess>, String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -830,6 +1167,77 @@ async fn inspect_processes(
     })
     .await
     .map_err(|error| format!("Process search task failed: {error}"))?
+}
+
+#[tauri::command]
+async fn inspect_folder_processes(folder_path: String) -> Result<Vec<PortProcess>, String> {
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = folder_path;
+        return Err("Folder handle inspection is currently available on Windows only".into());
+    }
+
+    #[cfg(target_os = "windows")]
+    tauri::async_runtime::spawn_blocking(move || {
+        let folder = PathBuf::from(folder_path.trim());
+        if !folder.is_dir() {
+            return Err("Choose an existing folder".into());
+        }
+
+        let matched_pids = folder_process_ids(&folder)?;
+        let mut socket_map = socket_map_by_process();
+        let system = System::new_all();
+        let mut rows = Vec::new();
+
+        for pid in matched_pids {
+            let Some(process) = system.process(Pid::from_u32(pid)) else {
+                continue;
+            };
+            let mut sockets = socket_map.remove(&pid).unwrap_or_default();
+            sockets.sort_by_key(|item| item.0);
+            sockets.dedup();
+            let mut ports = sockets.iter().map(|item| item.0).collect::<Vec<_>>();
+            ports.sort_unstable();
+            ports.dedup();
+            let protocol = sockets
+                .iter()
+                .map(|item| item.1.as_str())
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>()
+                .join("/");
+
+            rows.push(PortProcess {
+                port: ports.first().copied(),
+                ports,
+                protocol,
+                state: "OPEN".into(),
+                pid,
+                process_name: process.name().to_string_lossy().into_owned(),
+                executable: process
+                    .exe()
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                command: process
+                    .cmd()
+                    .iter()
+                    .map(|part| part.to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                memory_bytes: process.memory(),
+            });
+        }
+
+        rows.sort_by(|left, right| {
+            left.process_name
+                .to_lowercase()
+                .cmp(&right.process_name.to_lowercase())
+                .then(left.pid.cmp(&right.pid))
+        });
+        Ok(rows)
+    })
+    .await
+    .map_err(|error| format!("Folder handle search task failed: {error}"))?
 }
 
 fn normalize_process_path(path: &Path) -> String {
@@ -1631,35 +2039,7 @@ fn start_system_monitor(app: tauri::AppHandle) {
 }
 
 #[cfg(target_os = "windows")]
-fn find_hardware_monitor() -> Option<PathBuf> {
-    let mut candidates = Vec::new();
-    if let Ok(configured) = std::env::var("TOOLDOCK_HARDWARE_MONITOR") {
-        candidates.push(PathBuf::from(configured));
-    }
-    if let Ok(current_exe) = std::env::current_exe() {
-        if let Some(parent) = current_exe.parent() {
-            candidates.push(parent.join("tooldock-hardware-monitor.exe"));
-            candidates.push(
-                parent
-                    .join("resources")
-                    .join("tooldock-hardware-monitor.exe"),
-            );
-        }
-    }
-    candidates.push(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("binaries")
-            .join("tooldock-hardware-monitor-x86_64-pc-windows-msvc.exe"),
-    );
-    candidates.into_iter().find(|path| path.is_file())
-}
-
-#[cfg(target_os = "windows")]
 fn start_hardware_sensor_monitor(app: tauri::AppHandle) {
-    let Some(path) = find_hardware_monitor() else {
-        eprintln!("ToolDock hardware monitor sidecar was not found; sensor values are unavailable");
-        return;
-    };
     thread::spawn(move || loop {
         let service_reading = std::env::var_os("PROGRAMDATA")
             .map(PathBuf::from)
@@ -1677,46 +2057,8 @@ fn start_hardware_sensor_monitor(app: tauri::AppHandle) {
             if let Ok(mut hardware) = app.state::<SystemMonitorState>().hardware.lock() {
                 *hardware = reading;
             }
-            thread::sleep(Duration::from_secs(2));
-            continue;
         }
-
-        let mut command = Command::new(&path);
-        command
-            .arg("--once")
-            .arg("--interval-ms")
-            .arg("2000")
-            .arg("--parent-pid")
-            .arg(std::process::id().to_string())
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        apply_no_window(&mut command);
-        match command.output() {
-            Ok(output) if output.status.success() => {
-                match serde_json::from_slice::<HardwareSensors>(&output.stdout) {
-                    Ok(reading) => {
-                        if let Ok(mut hardware) = app.state::<SystemMonitorState>().hardware.lock()
-                        {
-                            *hardware = reading;
-                        }
-                    }
-                    Err(error) => {
-                        eprintln!("Unable to parse ToolDock hardware sensor data: {error}");
-                    }
-                }
-            }
-            Ok(output) => {
-                eprintln!(
-                    "ToolDock hardware monitor exited with status {}",
-                    output.status
-                );
-            }
-            Err(error) => {
-                eprintln!("Unable to run the ToolDock hardware monitor: {error}");
-            }
-        }
-        thread::sleep(Duration::from_secs(10));
+        thread::sleep(Duration::from_secs(2));
     });
 }
 
@@ -1747,6 +2089,20 @@ fn requested_folder(requested: Option<String>, fallback: PathBuf) -> Result<Path
 fn encode_data_url(path: &Path) -> Result<String, String> {
     let bytes = fs::read(path).map_err(|error| format!("无法读取图片预览：{error}"))?;
     Ok(format!("data:image/png;base64,{}", STANDARD.encode(bytes)))
+}
+
+fn encode_screenshot_preview(path: &Path) -> Result<String, String> {
+    let source =
+        image::open(path).map_err(|error| format!("Unable to read screenshot preview: {error}"))?;
+    let preview = source.thumbnail(960, 540).to_rgb8();
+    let mut bytes = Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb8(preview)
+        .write_to(&mut bytes, image::ImageFormat::Jpeg)
+        .map_err(|error| format!("Unable to encode screenshot preview: {error}"))?;
+    Ok(format!(
+        "data:image/jpeg;base64,{}",
+        STANDARD.encode(bytes.into_inner())
+    ))
 }
 
 fn copy_image_to_clipboard(image: &RgbaImage) -> Result<(), String> {
@@ -1882,12 +2238,11 @@ async fn list_screenshot_history(
             .into_iter()
             .take(20)
             .filter_map(|(modified, path)| {
-                let opened = image::open(&path).ok()?;
-                let (width, height) = opened.dimensions();
+                let (width, height) = image::image_dimensions(&path).ok()?;
                 let created: DateTime<Local> = modified.into();
                 Some(Ok(ScreenshotResult {
                     path: path.to_string_lossy().into_owned(),
-                    data_url: encode_data_url(&path).ok()?,
+                    data_url: String::new(),
                     width,
                     height,
                     monitor_name: "截图".into(),
@@ -1898,6 +2253,13 @@ async fn list_screenshot_history(
     })
     .await
     .map_err(|error| format!("截图历史任务失败：{error}"))?
+}
+
+#[tauri::command]
+async fn load_screenshot_preview(path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || encode_screenshot_preview(Path::new(&path)))
+        .await
+        .map_err(|error| format!("Screenshot preview task failed: {error}"))?
 }
 
 #[tauri::command]
@@ -2865,7 +3227,23 @@ fn ffmpeg_works(path: &Path) -> bool {
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     apply_no_window(&mut command);
-    command.status().is_ok_and(|status| status.success())
+    let Ok(mut child) = command.spawn() else {
+        return false;
+    };
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if started.elapsed() < Duration::from_secs(3) => {
+                thread::sleep(Duration::from_millis(20));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    }
 }
 
 fn find_ffmpeg() -> Option<PathBuf> {
@@ -2892,8 +3270,8 @@ fn find_ffmpeg() -> Option<PathBuf> {
 }
 
 #[tauri::command]
-fn recording_capabilities() -> RecordingCapabilities {
-    match find_ffmpeg() {
+async fn recording_capabilities() -> Result<RecordingCapabilities, String> {
+    tauri::async_runtime::spawn_blocking(|| match find_ffmpeg() {
         Some(path) => RecordingCapabilities {
             available: true,
             ffmpeg_path: Some(path.to_string_lossy().into_owned()),
@@ -2904,27 +3282,64 @@ fn recording_capabilities() -> RecordingCapabilities {
             ffmpeg_path: None,
             message: "未找到 FFmpeg。请安装 FFmpeg，或通过 TOOLDOCK_FFMPEG 指定可执行文件。".into(),
         },
-    }
+    })
+    .await
+    .map_err(|error| format!("FFmpeg 检测任务失败：{error}"))
 }
 
-#[tauri::command]
-fn list_audio_inputs() -> Result<Vec<AudioInputInfo>, String> {
+fn command_stderr_with_timeout(
+    command: &mut Command,
+    timeout: Duration,
+) -> Result<Vec<u8>, String> {
+    command.stdout(Stdio::null()).stderr(Stdio::piped());
+    apply_no_window(command);
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("无法启动设备检测：{error}"))?;
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if started.elapsed() < timeout => {
+                thread::sleep(Duration::from_millis(20));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("音频设备检测超时".into());
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("无法读取音频设备检测状态：{error}"));
+            }
+        }
+    }
+    let mut stderr = Vec::new();
+    if let Some(mut pipe) = child.stderr.take() {
+        pipe.read_to_end(&mut stderr)
+            .map_err(|error| format!("无法读取音频设备检测结果：{error}"))?;
+    }
+    Ok(stderr)
+}
+
+fn detect_audio_inputs() -> Result<Vec<AudioInputInfo>, String> {
     #[cfg(target_os = "windows")]
     {
         let ffmpeg = find_ffmpeg().ok_or_else(|| "未找到 FFmpeg，无法检测音频设备".to_string())?;
-        let output = Command::new(ffmpeg)
-            .args([
-                "-hide_banner",
-                "-list_devices",
-                "true",
-                "-f",
-                "dshow",
-                "-i",
-                "dummy",
-            ])
-            .output()
-            .map_err(|error| format!("无法检测音频设备：{error}"))?;
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let mut command = Command::new(ffmpeg);
+        command.args([
+            "-nostdin",
+            "-hide_banner",
+            "-list_devices",
+            "true",
+            "-f",
+            "dshow",
+            "-i",
+            "dummy",
+        ]);
+        let output = command_stderr_with_timeout(&mut command, Duration::from_secs(5))?;
+        let stderr = String::from_utf8_lossy(&output);
         let mut devices = Vec::new();
         for line in stderr
             .lines()
@@ -2951,19 +3366,19 @@ fn list_audio_inputs() -> Result<Vec<AudioInputInfo>, String> {
     #[cfg(target_os = "macos")]
     {
         let ffmpeg = find_ffmpeg().ok_or_else(|| "FFmpeg was not found".to_string())?;
-        let output = Command::new(ffmpeg)
-            .args([
-                "-hide_banner",
-                "-f",
-                "avfoundation",
-                "-list_devices",
-                "true",
-                "-i",
-                "",
-            ])
-            .output()
-            .map_err(|error| format!("Could not detect audio devices: {error}"))?;
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let mut command = Command::new(ffmpeg);
+        command.args([
+            "-nostdin",
+            "-hide_banner",
+            "-f",
+            "avfoundation",
+            "-list_devices",
+            "true",
+            "-i",
+            "",
+        ]);
+        let output = command_stderr_with_timeout(&mut command, Duration::from_secs(5))?;
+        let stderr = String::from_utf8_lossy(&output);
         let mut in_audio_section = false;
         let mut devices = Vec::new();
         for line in stderr.lines() {
@@ -3023,6 +3438,13 @@ fn list_audio_inputs() -> Result<Vec<AudioInputInfo>, String> {
 
     #[allow(unreachable_code)]
     Ok(Vec::new())
+}
+
+#[tauri::command]
+async fn list_audio_inputs() -> Result<Vec<AudioInputInfo>, String> {
+    tauri::async_runtime::spawn_blocking(detect_audio_inputs)
+        .await
+        .map_err(|error| format!("音频设备检测任务失败：{error}"))?
 }
 
 #[cfg(target_os = "windows")]
@@ -5287,6 +5709,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             inspect_ports,
             inspect_processes,
+            inspect_folder_processes,
             kill_processes,
             list_monitors,
             load_settings,
@@ -5297,6 +5720,7 @@ pub fn run() {
             capture_screenshot,
             finish_region_capture,
             list_screenshot_history,
+            load_screenshot_preview,
             list_recording_history,
             open_region_selector,
             get_region_selector_overlay,
@@ -5332,14 +5756,14 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     #[cfg(target_os = "windows")]
-    use super::{calculate_process_cpu_usage, ProcessCpuKey};
+    use super::{calculate_process_cpu_usage, folder_process_ids_for_pids, ProcessCpuKey};
     use super::{
         default_settings, encode_color_picker_bmp, encode_overlay_preview,
         encode_recording_preview, floating_system_widget_width, render_system_tray_icon,
         RecordingConfig, RecordingSourceConfig, SystemMetrics,
     };
     #[cfg(target_os = "windows")]
-    use std::{collections::HashMap, time::Duration};
+    use std::{collections::HashMap, fs, time::Duration};
     use xcap::image::{Rgba, RgbaImage};
 
     #[test]
@@ -5503,5 +5927,25 @@ mod tests {
         let usage = calculate_process_cpu_usage(&previous, &current, Duration::from_secs(1), 1);
 
         assert_eq!(usage, 100.0);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn folder_handle_scan_finds_the_current_process() {
+        let folder = std::env::temp_dir().join(format!(
+            "tooldock-folder-handle-test-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&folder).expect("temporary folder should be created");
+        let file_path = folder.join("held-open.txt");
+        let held_file = fs::File::create(&file_path).expect("test file should be opened");
+
+        let matches = folder_process_ids_for_pids(&folder, [std::process::id()])
+            .expect("folder handles should be inspected");
+        assert!(matches.contains(&std::process::id()));
+
+        drop(held_file);
+        let _ = fs::remove_file(file_path);
+        let _ = fs::remove_dir(folder);
     }
 }

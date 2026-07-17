@@ -10,6 +10,7 @@ import {
   Dices,
   ExternalLink,
   FileSearch,
+  FolderSearch,
   Hash,
   KeyRound,
   LoaderCircle,
@@ -33,6 +34,9 @@ import {
   X,
 } from "lucide-react";
 import {
+  chooseDirectory,
+  chooseExecutable,
+  inspectFolderProcesses,
   inspectPorts,
   inspectProcesses,
   isDesktopApp,
@@ -43,7 +47,6 @@ import {
   pickScreenColor,
   saveSettings,
   showMainWindow,
-  chooseExecutable,
 } from "./lib/native";
 import { RecordingTool } from "./components/RecordingTool";
 import { LanTool } from "./components/LanTool";
@@ -89,7 +92,9 @@ const PORT_INPUT_KEY = "tooldock-port-input";
 const PORT_HISTORY_KEY = "tooldock-port-history";
 const PROCESS_INPUT_KEY = "tooldock-process-input";
 const PROCESS_HISTORY_KEY = "tooldock-process-history";
-type ProcessQueryMode = "port" | "process" | "executable";
+const FOLDER_INPUT_KEY = "tooldock-folder-input";
+const FOLDER_HISTORY_KEY = "tooldock-folder-history";
+type ProcessQueryMode = "port" | "process" | "executable" | "folder";
 
 const routeMarketUrl =
   "https://routemarket.ai/?utm_source=tooldock&utm_medium=desktop_app&utm_campaign=sidebar_promo&utm_content=routemarket";
@@ -359,7 +364,7 @@ function App() {
           <div className="sidebar-footer">
             <span className="status-dot" />
             <span title={status}>{status}</span>
-            <kbd>v0.1.2</kbd>
+            <kbd>v0.1.3</kbd>
           </div>
         </div>
       </aside>
@@ -433,12 +438,22 @@ function PortsTool({
       return [];
     }
   });
+  const [recentFolderQueries, setRecentFolderQueries] = useState<string[]>(() => {
+    try {
+      return JSON.parse(window.localStorage.getItem(FOLDER_HISTORY_KEY) || "[]");
+    } catch {
+      return [];
+    }
+  });
   const [processes, setProcesses] = useState<PortProcess[]>([]);
   const [queryMode, setQueryMode] = useState<ProcessQueryMode>("port");
   const [processQuery, setProcessQuery] = useState(
     () => window.localStorage.getItem(PROCESS_INPUT_KEY) || "",
   );
   const [executablePath, setExecutablePath] = useState("");
+  const [folderPath, setFolderPath] = useState(
+    () => window.localStorage.getItem(FOLDER_INPUT_KEY) || "",
+  );
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -463,6 +478,10 @@ function PortsTool({
   }, [processQuery]);
 
   useEffect(() => {
+    window.localStorage.setItem(FOLDER_INPUT_KEY, folderPath);
+  }, [folderPath]);
+
+  useEffect(() => {
     if (selectAllRef.current) {
       selectAllRef.current.indeterminate = someSelected && !allSelected;
     }
@@ -479,6 +498,10 @@ function PortsTool({
     }
     if (queryMode === "executable" && !executablePath) {
       setError(t("ports.executableInvalid"));
+      return;
+    }
+    if (queryMode === "folder" && !folderPath) {
+      setError(t("ports.folderInvalid"));
       return;
     }
     if (queryMode === "port") {
@@ -501,6 +524,16 @@ function PortsTool({
         window.localStorage.setItem(PROCESS_HISTORY_KEY, JSON.stringify(next));
         return next;
       });
+    } else if (queryMode === "folder") {
+      const normalizedQuery = folderPath.trim();
+      setRecentFolderQueries((current) => {
+        const next = [normalizedQuery, ...current.filter((item) => item !== normalizedQuery)].slice(
+          0,
+          6,
+        );
+        window.localStorage.setItem(FOLDER_HISTORY_KEY, JSON.stringify(next));
+        return next;
+      });
     }
     setLoading(true);
     setError("");
@@ -509,7 +542,12 @@ function PortsTool({
       const result =
         queryMode === "port"
           ? await inspectPorts(ports)
-          : await inspectProcesses(processQuery, queryMode === "executable" ? executablePath : undefined);
+          : queryMode === "folder"
+            ? await inspectFolderProcesses(folderPath)
+            : await inspectProcesses(
+                processQuery,
+                queryMode === "executable" ? executablePath : undefined,
+              );
       setProcesses(result);
       setSelected(new Set());
       onStatus(
@@ -577,7 +615,7 @@ function PortsTool({
 
       <div className="query-bar">
         <div className="segmented process-query-modes">
-          {(["port", "process", "executable"] as ProcessQueryMode[]).map((mode) => (
+          {(["port", "process", "executable", "folder"] as ProcessQueryMode[]).map((mode) => (
             <button
               className={queryMode === mode ? "active" : ""}
               key={mode}
@@ -591,7 +629,13 @@ function PortsTool({
           ))}
         </div>
         <div className="input-wrap">
-          {queryMode === "executable" ? <FileSearch size={18} /> : <TerminalSquare size={18} />}
+          {queryMode === "executable" ? (
+            <FileSearch size={18} />
+          ) : queryMode === "folder" ? (
+            <FolderSearch size={18} />
+          ) : (
+            <TerminalSquare size={18} />
+          )}
           {queryMode === "port" ? (
             <input
               value={portInput}
@@ -608,22 +652,36 @@ function PortsTool({
               placeholder={t("ports.processPlaceholder")}
               aria-label={t("ports.processName")}
             />
-          ) : (
+          ) : queryMode === "executable" ? (
             <input
               value={executablePath}
               readOnly
               placeholder={t("ports.executablePlaceholder")}
               aria-label={t("ports.executable")}
             />
+          ) : (
+            <input
+              value={folderPath}
+              onChange={(event) => setFolderPath(event.target.value)}
+              onKeyDown={(event) => event.key === "Enter" && runInspect()}
+              placeholder={t("ports.folderPlaceholder")}
+              aria-label={t("ports.folder")}
+            />
           )}
           {queryMode === "port" ? (
             <span>{t("ports.count", { count: ports.length })}</span>
-          ) : queryMode === "executable" ? (
+          ) : queryMode === "executable" || queryMode === "folder" ? (
             <button
               className="inline-browse-button"
               onClick={async () => {
-                const path = await chooseExecutable();
-                if (path) setExecutablePath(path);
+                const path =
+                  queryMode === "executable"
+                    ? await chooseExecutable()
+                    : await chooseDirectory(folderPath);
+                if (path) {
+                  if (queryMode === "executable") setExecutablePath(path);
+                  else setFolderPath(path);
+                }
               }}
             >
               {t("common.browse")}
@@ -653,6 +711,15 @@ function PortsTool({
         <div className="quick-values port-query-history" aria-label={t("ports.recent")}>
           {recentProcessQueries.map((query) => (
             <button key={query} onClick={() => setProcessQuery(query)}>
+              {query}
+            </button>
+          ))}
+        </div>
+      )}
+      {queryMode === "folder" && recentFolderQueries.length > 0 && (
+        <div className="quick-values port-query-history" aria-label={t("ports.recent")}>
+          {recentFolderQueries.map((query) => (
+            <button key={query} onClick={() => setFolderPath(query)} title={query}>
               {query}
             </button>
           ))}
@@ -746,7 +813,9 @@ function PortsTool({
                 <code>{process.pid || "-"}</code>
                 <span>
                   <span className={process.state === "LISTEN" ? "state listening" : "state"}>
-                    {process.state || "-"}
+                    {queryMode === "folder" && process.state === "OPEN"
+                      ? t("ports.folderState")
+                      : process.state || "-"}
                   </span>
                 </span>
                 <span className="memory">{formatBytes(process.memoryBytes)}</span>
@@ -758,8 +827,10 @@ function PortsTool({
             <span className="empty-visual">
               <Network size={30} />
             </span>
-            <strong>{t("ports.emptyTitle")}</strong>
-            <p>{t("ports.emptyText")}</p>
+            <strong>
+              {t(queryMode === "folder" ? "ports.folderEmptyTitle" : "ports.emptyTitle")}
+            </strong>
+            <p>{t(queryMode === "folder" ? "ports.folderEmptyText" : "ports.emptyText")}</p>
           </div>
         )}
       </div>

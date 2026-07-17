@@ -12,6 +12,7 @@ import {
   finishRegionCapture,
   listMonitors,
   listScreenshotHistory,
+  loadScreenshotPreview,
   selectDesktopRegion,
 } from "../lib/native";
 import { createTranslator, localeFor } from "../i18n";
@@ -47,6 +48,7 @@ export function ScreenshotTool({
   const [showCopiedToast, setShowCopiedToast] = useState(false);
   const handledShortcut = useRef(0);
   const toastTimer = useRef<number | null>(null);
+  const previewQueueVersion = useRef(0);
 
   useEffect(() => {
     listMonitors()
@@ -59,12 +61,17 @@ export function ScreenshotTool({
   }, []);
 
   useEffect(() => {
+    const queueVersion = ++previewQueueVersion.current;
     listScreenshotHistory(settings.screenshotDir)
       .then((items) => {
         setHistory(items);
         if (items[0]) setLastShot(items[0]);
+        void loadHistoryPreviews(items, queueVersion);
       })
       .catch((reason) => setError(String(reason)));
+    return () => {
+      previewQueueVersion.current += 1;
+    };
   }, [settings.screenshotDir]);
 
   useEffect(() => {
@@ -87,6 +94,39 @@ export function ScreenshotTool({
       setShowCopiedToast(false);
       toastTimer.current = null;
     }, 3200);
+  }
+
+  function applyPreview(path: string, dataUrl: string) {
+    setHistory((current) =>
+      current.map((item) => (item.path === path ? { ...item, dataUrl } : item)),
+    );
+    setLastShot((current) =>
+      current?.path === path ? { ...current, dataUrl } : current,
+    );
+  }
+
+  async function ensurePreview(item: ScreenshotResult, queueVersion?: number) {
+    if (item.dataUrl) return;
+    try {
+      const dataUrl = await loadScreenshotPreview(item.path);
+      if (queueVersion !== undefined && previewQueueVersion.current !== queueVersion) return;
+      applyPreview(item.path, dataUrl);
+    } catch {
+      // An unreadable history image should not block the screenshot page.
+    }
+  }
+
+  async function loadHistoryPreviews(items: ScreenshotResult[], queueVersion: number) {
+    for (const item of items) {
+      if (previewQueueVersion.current !== queueVersion) return;
+      await ensurePreview(item, queueVersion);
+      await new Promise((resolve) => window.setTimeout(resolve, 20));
+    }
+  }
+
+  function selectHistoryItem(item: ScreenshotResult) {
+    setLastShot(item);
+    void ensurePreview(item);
   }
 
   async function capture(requestedMode: CaptureMode = mode, requestedDelay = delay) {
@@ -245,7 +285,7 @@ export function ScreenshotTool({
         {history.length ? (
           <div className="screenshot-history-list">
             {history.map((item) => (
-              <button className="screenshot-history-item" key={item.path} onClick={() => setLastShot(item)}>
+              <button className="screenshot-history-item" key={item.path} onClick={() => selectHistoryItem(item)}>
                 {item.dataUrl ? <img src={item.dataUrl} alt="" /> : <ImageIcon size={24} />}
                 <span>
                   <strong>{item.width} × {item.height}</strong>
