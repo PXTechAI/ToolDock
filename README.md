@@ -6,7 +6,7 @@
 
 ToolDock brings color picking, port process management, screenshots, screen recording, secure string generation, and local-network sharing into one desktop app. It works on Windows, macOS, and Linux, requires no account, and keeps your working data on your computer.
 
-![ToolDock color picker](website/assets/color-picker-light.png)
+![ToolDock color picker](website/assets/color-picker.png)
 
 ## Download
 
@@ -35,8 +35,8 @@ Early releases may not be code-signed. Your operating system may ask you to conf
 - **Work your way** with light and dark themes, four interface languages, configurable fonts, global shortcuts, storage folders, and system tray behavior.
 
 <p>
-  <img src="website/assets/ports-light.png" alt="ToolDock port process manager" width="49%">
-  <img src="website/assets/recording-dark.png" alt="ToolDock screen recorder" width="49%">
+  <img src="website/assets/ports.png" alt="ToolDock port process manager" width="49%">
+  <img src="website/assets/recording.png" alt="ToolDock screen recorder" width="49%">
 </p>
 
 ## Quick Start
