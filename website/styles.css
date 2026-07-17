@@ -145,7 +145,7 @@ a:focus-visible {
 }
 
 .hero-image {
-  background-image: url("assets/recording-dark.png");
+  background-image: url("assets/recording.png");
   background-position: 58% center;
   background-size: cover;
   transform: scale(1.02);
@@ -502,8 +502,13 @@ h1 {
   line-height: 1.7;
 }
 
-.primary-shot,
-.secondary-shots figure {
+.screenshot-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.screenshot-card {
   overflow: hidden;
   margin: 0;
   border: 1px solid #363e49;
@@ -511,27 +516,39 @@ h1 {
   background: #0d1014;
 }
 
-.primary-shot img,
-.secondary-shots img {
+.screenshot-media {
+  overflow: hidden;
+  aspect-ratio: 1180 / 760;
+  background: #eef2f6;
+}
+
+.screenshot-media img {
   display: block;
   width: 100%;
-  height: auto;
+  height: 100%;
+  object-fit: cover;
+}
+
+.screenshot-card-focus-left .screenshot-media img,
+.screenshot-card-focus-right .screenshot-media img {
+  transform: scale(1.28);
+}
+
+.screenshot-card-focus-left .screenshot-media img {
+  transform-origin: 84% 30%;
+}
+
+.screenshot-card-focus-right .screenshot-media img {
+  transform-origin: 84% 72%;
 }
 
 figcaption {
+  min-height: 50px;
   padding: 15px 18px;
   border-top: 1px solid #363e49;
   color: #b8c0ca;
   font-size: 13px;
   font-weight: 650;
-}
-
-.secondary-shots {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: 18px;
-  margin-top: 18px;
-  align-items: start;
 }
 
 .download-heading {
@@ -777,7 +794,7 @@ footer {
   }
 
   .feature-grid,
-  .secondary-shots,
+  .screenshot-grid,
   .platform-grid {
     grid-template-columns: 1fr;
   }
