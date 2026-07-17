@@ -19,7 +19,7 @@ const translations = {
     introCopy:
       "ToolDock brings screen, process, and text utilities together without sending your data through a browser service.",
     featuresEyebrow: "One dock, daily tools",
-    featuresTitle: "Five focused tools for everyday development work",
+    featuresTitle: "Eight focused tools for everyday development work",
     colorTitle: "Screen color picker",
     colorCopy:
       "Pick across displays with an overlay and magnifier, then copy HEX and RGB instantly.",
@@ -35,6 +35,15 @@ const translations = {
     stringTitle: "Secure string generator",
     stringCopy:
       "Generate UUIDs, HEX values, passwords, and custom-length random strings in batches.",
+    lanTitle: "LAN file transfer",
+    lanCopy:
+      "Discover nearby ToolDock devices, connect with a shared password, and transfer files directly across the local network.",
+    clipboardTitle: "Cross-device clipboard",
+    clipboardCopy:
+      "Send clipboard text to a connected computer and paste it there without routing content through a cloud service.",
+    monitorTitle: "System monitor widget",
+    monitorCopy:
+      "Watch CPU, memory, temperature, fan speed, and network throughput from a compact floating or notification-area widget.",
     workflowEyebrow: "Designed for momentum",
     workflowTitle: "Available the moment you need it, gone when you do not.",
     workflowCopy:
@@ -95,7 +104,7 @@ const translations = {
     introTitle: "把桌面上缺少的开发工具抽屉补齐。",
     introCopy: "ToolDock 集中处理屏幕、进程和文本任务，无需把数据发送到浏览器服务。",
     featuresEyebrow: "一个工具箱，覆盖日常需求",
-    featuresTitle: "五个专注工具，解决每天都会遇到的开发任务",
+    featuresTitle: "八个专注工具，解决每天都会遇到的开发任务",
     colorTitle: "屏幕取色",
     colorCopy: "跨屏遮罩与鼠标放大镜，选中后立即复制 HEX 和 RGB 色值。",
     portTitle: "端口进程管理",
@@ -106,6 +115,12 @@ const translations = {
     recordCopy: "录制显示器、区域或应用窗口，支持实时预览、画质参数和可选音频。",
     stringTitle: "安全字符串生成",
     stringCopy: "批量生成 UUID、HEX、密码和指定长度的随机字符串。",
+    lanTitle: "局域网文件传输",
+    lanCopy: "自动发现附近的 ToolDock 设备，通过连接密码配对，并在局域网内直接传输文件。",
+    clipboardTitle: "跨设备剪贴板",
+    clipboardCopy: "把剪贴板文本发送到已连接的电脑，无需经过云端服务即可在另一台设备直接粘贴。",
+    monitorTitle: "系统性能监控小组件",
+    monitorCopy: "通过紧凑的悬浮或通知区域小组件查看 CPU、内存、温度、风扇转速和网络速度。",
     workflowEyebrow: "为连续工作而设计",
     workflowTitle: "需要时立即出现，完成后安静退场。",
     workflowCopy:
@@ -161,7 +176,7 @@ const translations = {
     introTitle: "デスクトップに足りなかった、開発ツールの引き出し。",
     introCopy: "画面、プロセス、テキストの作業を一つにまとめ、データをブラウザーサービスへ送信しません。",
     featuresEyebrow: "日常ツールを一か所に",
-    featuresTitle: "毎日の開発を支える、五つの集中したツール",
+    featuresTitle: "毎日の開発を支える、八つの集中したツール",
     colorTitle: "画面カラーピッカー",
     colorCopy: "複数画面対応のオーバーレイと拡大鏡で、HEX と RGB をすぐにコピー。",
     portTitle: "ポートプロセス管理",
@@ -172,6 +187,12 @@ const translations = {
     recordCopy: "画面、範囲、アプリウィンドウをライブプレビュー、画質設定、任意の音声付きで録画。",
     stringTitle: "安全な文字列生成",
     stringCopy: "UUID、HEX、パスワード、任意長のランダム文字列をまとめて生成。",
+    lanTitle: "LAN ファイル転送",
+    lanCopy: "近くの ToolDock デバイスを検出し、共通パスワードで接続して、ローカルネットワーク内で直接ファイルを転送。",
+    clipboardTitle: "デバイス間クリップボード",
+    clipboardCopy: "クラウドサービスを経由せず、接続したコンピューターへクリップボードのテキストを送信して貼り付け。",
+    monitorTitle: "システム監視ウィジェット",
+    monitorCopy: "コンパクトなフローティングまたは通知領域ウィジェットで CPU、メモリ、温度、ファン速度、通信速度を確認。",
     workflowEyebrow: "流れを止めない設計",
     workflowTitle: "必要な瞬間に現れ、終われば静かに戻ります。",
     workflowCopy:
@@ -227,7 +248,7 @@ const translations = {
     introTitle: "데스크톱에 부족했던 개발 도구 서랍.",
     introCopy: "화면, 프로세스, 텍스트 도구를 한곳에 모으고 데이터를 브라우저 서비스로 보내지 않습니다.",
     featuresEyebrow: "매일 쓰는 도구를 한곳에",
-    featuresTitle: "일상적인 개발 작업을 위한 다섯 가지 집중 도구",
+    featuresTitle: "일상적인 개발 작업을 위한 여덟 가지 집중 도구",
     colorTitle: "화면 색상 추출",
     colorCopy: "다중 화면 오버레이와 돋보기로 HEX와 RGB 값을 즉시 복사합니다.",
     portTitle: "포트 프로세스 관리",
@@ -238,6 +259,12 @@ const translations = {
     recordCopy: "디스플레이, 영역, 앱 창을 실시간 미리보기, 품질 설정, 선택적 오디오와 함께 녹화합니다.",
     stringTitle: "안전한 문자열 생성",
     stringCopy: "UUID, HEX, 비밀번호와 원하는 길이의 무작위 문자열을 일괄 생성합니다.",
+    lanTitle: "LAN 파일 전송",
+    lanCopy: "주변 ToolDock 장치를 검색하고 공유 비밀번호로 연결해 로컬 네트워크에서 파일을 직접 전송합니다.",
+    clipboardTitle: "기기 간 클립보드",
+    clipboardCopy: "클라우드 서비스를 거치지 않고 연결된 컴퓨터로 클립보드 텍스트를 보내 바로 붙여넣습니다.",
+    monitorTitle: "시스템 모니터 위젯",
+    monitorCopy: "간결한 플로팅 또는 알림 영역 위젯에서 CPU, 메모리, 온도, 팬 속도와 네트워크 속도를 확인합니다.",
     workflowEyebrow: "작업 흐름을 위한 설계",
     workflowTitle: "필요한 순간 바로 나타나고, 끝나면 조용히 물러납니다.",
     workflowCopy:

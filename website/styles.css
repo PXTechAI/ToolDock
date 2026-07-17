@@ -402,8 +402,8 @@ h1 {
   background: #ffffff;
 }
 
-.feature-card:nth-child(4),
-.feature-card:nth-child(5) {
+.feature-card:nth-child(7),
+.feature-card:nth-child(8) {
   grid-column: span 3;
 }
 
@@ -701,8 +701,8 @@ footer {
   }
 
   .feature-card,
-  .feature-card:nth-child(4),
-  .feature-card:nth-child(5) {
+  .feature-card:nth-child(7),
+  .feature-card:nth-child(8) {
     grid-column: span 3;
   }
 }
@@ -783,8 +783,8 @@ footer {
   }
 
   .feature-card,
-  .feature-card:nth-child(4),
-  .feature-card:nth-child(5) {
+  .feature-card:nth-child(7),
+  .feature-card:nth-child(8) {
     grid-column: auto;
     min-height: 230px;
   }
