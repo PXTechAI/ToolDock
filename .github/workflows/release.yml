@@ -75,7 +75,7 @@ jobs:
             xdg-utils
 
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc
           cache: npm
@@ -106,7 +106,7 @@ jobs:
 
       - name: Set up .NET
         if: runner.os == 'Windows'
-        uses: actions/setup-dotnet@v5
+        uses: actions/setup-dotnet@v6
         with:
           dotnet-version: 8.0.x
 
@@ -250,7 +250,7 @@ jobs:
 
     steps:
       - name: Publish completed release
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
         with:
